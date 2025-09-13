@@ -1,0 +1,7 @@
+html, body { height: 100%; }
+.table td, .table th { vertical-align: middle; }
+.card-header { letter-spacing: .4px; }
+.cell-selected { font-weight: 700; }
+.cell-empty { color: #999; }
+
+.table td.text-center, .table th.text-center { text-align: center; }
