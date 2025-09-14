@@ -1,0 +1,253 @@
+# ================================================================
+# FClass Report System - Apache Configuration
+# Version: 9.0
+# ================================================================
+
+# Włącz przepisywanie URL-i
+RewriteEngine On
+
+# ================================================================
+# BEZPIECZEŃSTWO
+# ================================================================
+
+# Ukryj informacje o serwerze
+ServerTokens Prod
+Header unset Server
+Header unset X-Powered-By
+
+# Zabezpiecz przed dostępem do wrażliwych plików
+<FilesMatch "\.(htaccess|htpasswd|ini|log|sql|bak|backup|old|tmp|temp)$">
+    Require all denied
+</FilesMatch>
+
+# Zabezpiecz katalogi app/ i inne wrażliwe
+RewriteRule ^(app|logs|cache|tmp|\.git)/ - [F,L]
+
+# Blokuj podejrzane requesty
+RewriteCond %{QUERY_STRING} (union.*select|insert.*into|delete.*from|drop.*table) [NC]
+RewriteRule .* - [F,L]
+
+# Blokuj próby SQL injection
+RewriteCond %{QUERY_STRING} (\<|%3C).*script.*(\>|%3E) [NC,OR]
+RewriteCond %{QUERY_STRING} GLOBALS(=|\[|\%[0-9A-Z]{0,2}) [OR]
+RewriteCond %{QUERY_STRING} _REQUEST(=|\[|\%[0-9A-Z]{0,2}) [OR]
+RewriteCond %{QUERY_STRING} ^.*(\[|\]|\(|\)|<|>|ê|"|;|\?|\*|=$).* [NC]
+RewriteRule .* - [F,L]
+
+# Blokuj user agenty botów (opcjonalnie)
+SetEnvIfNoCase User-Agent "libwww-perl" bad_bot
+SetEnvIfNoCase User-Agent "wget" bad_bot
+SetEnvIfNoCase User-Agent "python" bad_bot
+<RequireAll>
+    Require all granted
+    Require not env bad_bot
+</RequireAll>
+
+# ================================================================
+# PRZEKIEROWANIA I CLEAN URLS
+# ================================================================
+
+# Usuń .php z URL-i
+RewriteCond %{REQUEST_FILENAME} !-d
+RewriteCond %{REQUEST_FILENAME} !-f
+RewriteRule ^([^\.]+)$ $1.php [NC,L]
+
+# Przekieruj z .php na clean URL (opcjonalnie)
+# RewriteCond %{THE_REQUEST} /([^.]+)\.php [NC]
+# RewriteRule ^ /%1? [NC,L,R=301]
+
+# Domyślna strona - index.php
+DirectoryIndex index.php index.html
+
+# Friendly URLs dla eksportów
+RewriteRule ^export/([a-z]+)\.(csv|json)$ export/$1.php?fmt=$2 [NC,L,QSA]
+RewriteRule ^export/([a-z]+)/([0-9]{4})\.(csv|json)$ export/$1.php?year=$2&fmt=$3 [NC,L,QSA]
+RewriteRule ^export/([a-z]+)/([0-9]{8})\.(csv|json)$ export/$1.php?day=$2&fmt=$3 [NC,L,QSA]
+
+# ================================================================
+# PERFORMANCE I KOMPRESJA
+# ================================================================
+
+# Włącz kompresję GZIP
+<IfModule mod_deflate.c>
+    AddOutputFilterByType DEFLATE text/plain
+    AddOutputFilterByType DEFLATE text/html
+    AddOutputFilterByType DEFLATE text/xml
+    AddOutputFilterByType DEFLATE text/css
+    AddOutputFilterByType DEFLATE text/javascript
+    AddOutputFilterByType DEFLATE application/xml
+    AddOutputFilterByType DEFLATE application/xhtml+xml
+    AddOutputFilterByType DEFLATE application/rss+xml
+    AddOutputFilterByType DEFLATE application/javascript
+    AddOutputFilterByType DEFLATE application/x-javascript
+    AddOutputFilterByType DEFLATE application/json
+</IfModule>
+
+# Cache statycznych plików
+<IfModule mod_expires.c>
+    ExpiresActive on
+    
+    # CSS i JS - 1 miesiąc
+    ExpiresByType text/css "access plus 1 month"
+    ExpiresByType application/javascript "access plus 1 month"
+    ExpiresByType text/javascript "access plus 1 month"
+    
+    # Obrazki - 3 miesiące
+    ExpiresByType image/png "access plus 3 months"
+    ExpiresByType image/jpg "access plus 3 months"
+    ExpiresByType image/jpeg "access plus 3 months"
+    ExpiresByType image/gif "access plus 3 months"
+    ExpiresByType image/svg+xml "access plus 3 months"
+    ExpiresByType image/ico "access plus 3 months"
+    ExpiresByType image/x-icon "access plus 3 months"
+    
+    # Fonty - 1 rok
+    ExpiresByType font/woff "access plus 1 year"
+    ExpiresByType font/woff2 "access plus 1 year"
+    
+    # Dokumenty - bez cache
+    ExpiresByType text/html "access plus 0 seconds"
+    ExpiresByType application/json "access plus 0 seconds"
+    ExpiresByType text/csv "access plus 0 seconds"
+</IfModule>
+
+# ETag dla lepszego cache
+<IfModule mod_headers.c>
+    # Remove ETags for better caching
+    Header unset ETag
+    FileETag None
+    
+    # Cache-Control headers
+    <FilesMatch "\.(css|js|png|jpg|jpeg|gif|svg|ico|woff|woff2)$">
+        Header set Cache-Control "public, max-age=2592000"
+    </FilesMatch>
+    
+    <FilesMatch "\.(html|php)$">
+        Header set Cache-Control "no-cache, no-store, must-revalidate"
+        Header set Pragma "no-cache"
+        Header set Expires "0"
+    </FilesMatch>
+    
+    # Security headers
+    Header always set X-Content-Type-Options nosniff
+    Header always set X-Frame-Options DENY
+    Header always set X-XSS-Protection "1; mode=block"
+    Header always set Referrer-Policy "strict-origin-when-cross-origin"
+    
+    # CSP dla dodatkowego bezpieczeństwa (dostosuj do potrzeb)
+    # Header always set Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' cdn.jsdelivr.net; style-src 'self' 'unsafe-inline' cdn.jsdelivr.net; img-src 'self' data:; font-src 'self' cdn.jsdelivr.net;"
+</IfModule>
+
+# ================================================================
+# RATE LIMITING (jeśli mod_security dostępne)
+# ================================================================
+
+<IfModule mod_security2.c>
+    # Ogranicz requesty do eksportów
+    <LocationMatch "^/export/">
+        SecRuleEngine On
+        SecRule REMOTE_ADDR "@detectSQLi" "id:1001,phase:2,block,msg:'SQL Injection Attack'"
+        SecRule REQUEST_METHOD "^(GET|POST)$" "id:1002,phase:1,t:none,pass,nolog,ctl:ruleEngine=DetectionOnly"
+    </LocationMatch>
+</IfModule>
+
+# ================================================================
+# ERROR PAGES
+# ================================================================
+
+# Niestandardowe strony błędów
+ErrorDocument 400 /error.php?code=400
+ErrorDocument 401 /error.php?code=401
+ErrorDocument 403 /error.php?code=403  
+ErrorDocument 404 /error.php?code=404
+ErrorDocument 500 /error.php?code=500
+
+# ================================================================
+# OPTYMALIZACJE PHP
+# ================================================================
+
+<IfModule mod_php.c>
+    # Zwiększ limity dla eksportów
+    php_value max_execution_time 60
+    php_value memory_limit 256M
+    php_value post_max_size 16M
+    php_value upload_max_filesize 16M
+    
+    # Bezpieczeństwo
+    php_flag display_errors Off
+    php_flag log_errors On
+    php_value error_log logs/error.log
+    
+    # Session security
+    php_flag session.cookie_httponly On
+    php_flag session.cookie_secure Off
+    php_value session.name FCLASS_SESSION
+</IfModule>
+
+# ================================================================
+# MIME TYPES
+# ================================================================
+
+<IfModule mod_mime.c>
+    # Dodaj MIME types dla nowoczesnych formatów
+    AddType application/json .json
+    AddType text/csv .csv
+    AddType font/woff .woff
+    AddType font/woff2 .woff2
+</IfModule>
+
+# ================================================================
+# SPECJALNE REGUŁY DLA FCLASS REPORT
+# ================================================================
+
+# Przekierowania kompatybilności wstecznej
+RewriteRule ^export\.php$ export/ranking.php [NC,L,QSA]
+RewriteRule ^ranking_export\.php$ export/ranking.php [NC,L,QSA]
+RewriteRule ^results_export\.php$ export/results.php [NC,L,QSA]
+RewriteRule ^teams_export\.php$ export/teams.php [NC,L,QSA]
+
+# API endpoints (dla przyszłości)
+RewriteRule ^api/v1/([a-z]+)/?$ api/v1/$1.php [NC,L,QSA]
+
+# Maintenance mode (odkomentuj gdy potrzeba)
+# RewriteCond %{REMOTE_ADDR} !^192\.168\.1\.100$
+# RewriteCond %{REQUEST_URI} !^/maintenance\.html$
+# RewriteRule ^(.*)$ /maintenance.html [R=503,L]
+
+# Force HTTPS (odkomentuj jeśli masz SSL)
+# RewriteCond %{HTTPS} off
+# RewriteRule ^(.*)$ https://%{HTTP_HOST}%{REQUEST_URI} [L,R=301]
+
+# ================================================================
+# LOGGING I MONITORING
+# ================================================================
+
+# Loguj podejrzane aktywności
+RewriteCond %{QUERY_STRING} (eval|base64|script) [NC]
+RewriteRule .* - [E=suspicious:1]
+CustomLog logs/suspicious.log combined env=suspicious
+
+# Blokuj niektóre requesty i loguj
+RewriteCond %{REQUEST_URI} (wp-admin|wp-login|xmlrpc) [NC]
+RewriteRule .* - [F,L,E=blocked:1]
+CustomLog logs/blocked.log combined env=blocked
+
+# ================================================================
+# KOMENTARZE I DOKUMENTACJA
+# ================================================================
+
+# Ten plik .htaccess został przygotowany dla FClass Report System v9.0
+# 
+# Główne funkcje:
+# - Bezpieczeństwo: SQL injection protection, file access blocking
+# - Performance: GZIP compression, browser caching
+# - Clean URLs: Friendly URLs for exports and API
+# - Compatibility: Backwards compatibility redirects
+# - Monitoring: Logging suspicious activities
+#
+# Aby dostosować do Twojego środowiska:
+# 1. Sprawdź czy wszystkie moduły Apache są dostępne
+# 2. Dostosuj ścieżki logów do swojego systemu
+# 3. Włącz HTTPS jeśli masz SSL
+# 4. Dostosuj CSP header do używanych zewnętrznych zasobów
+# 5. Przetestuj wszystkie funkcjonalności po wdrożeniu

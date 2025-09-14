@@ -1,445 +1,507 @@
 <?php
-// public/index.php — WYNIKI / RANKING / ZESPOŁY (pełny, scalony)
+/**
+ * Główny plik aplikacji FClass Report
+ * 
+ * Unified interface obsługujący wszystkie widoki systemu:
+ * - Wyniki zawodów (results)
+ * - Ranking roczny (ranking) 
+ * - Zespoły ME (teams)
+ * 
+ * @author FClass Report Team
+ * @version 9.0
+ * @since 2025
+ */
+
+// Ustaw kodowanie odpowiedzi
 header('Content-Type: text/html; charset=utf-8');
 
-$view = isset($_GET['view']) ? strtolower((string)$_GET['view']) : 'results';
-$MIN_YEAR = 2020;
+// === BEZPIECZEŃSTWO I WALIDACJA ===
+session_start();
 
-// wspólne include’y
+// Podstawowe zabezpieczenia
+if (!empty($_SERVER['HTTP_X_FORWARDED_FOR']) || !empty($_SERVER['HTTP_X_REAL_IP'])) {
+    // Log potential proxy usage for monitoring
+    error_log("Proxy usage detected: " . ($_SERVER['REMOTE_ADDR'] ?? 'unknown'));
+}
+
+// Rate limiting (prosty mechanizm)
+$clientKey = 'requests_' . ($_SERVER['REMOTE_ADDR'] ?? 'unknown');
+if (!isset($_SESSION[$clientKey])) {
+    $_SESSION[$clientKey] = ['count' => 0, 'last_reset' => time()];
+}
+
+$rateLimit = &$_SESSION[$clientKey];
+if ((time() - $rateLimit['last_reset']) > 60) {
+    // Reset co minutę
+    $rateLimit['count'] = 0;
+    $rateLimit['last_reset'] = time();
+}
+
+$rateLimit['count']++;
+if ($rateLimit['count'] > 100) { // 100 requestów na minutę
+    http_response_code(429);
+    die('Rate limit exceeded. Please try again later.');
+}
+
+// === INCLUDE DEPENDENCIES ===
 require_once __DIR__ . '/../app/encoding.php';
 require_once __DIR__ . '/../app/classmap.php';
+require_once __DIR__ . '/../app/cache.php';
 
-// helper: nawigacja
-function render_nav($active) {
-  echo '<div class="d-flex gap-2">';
-  echo '<a class="btn '.($active==='ranking'?'btn-primary':'btn-outline-secondary').'" href="index.php?view=ranking">Ranking</a>';
-  echo '<a class="btn '.($active==='results'?'btn-primary':'btn-outline-secondary').'" href="index.php?view=results">Wyniki</a>';
-  echo '<a class="btn '.($active==='teams'?'btn-primary':'btn-outline-secondary').'" href="index.php?view=teams">Zespoły</a>';
-  echo '</div>';
+// === KONFIGURACJA I STAŁE ===
+$config = require __DIR__ . '/../app/config.php';
+
+// Walidacja parametrów wejściowych
+$view = sanitize_input($_GET['view'] ?? 'results', ['max_length' => 20]);
+$allowedViews = ['results', 'ranking', 'teams'];
+
+if (!in_array($view, $allowedViews, true)) {
+    $view = 'results';
 }
 
-///////////////////////////////////////////////////////////////
-// WIDOK ZESPOŁY (ME tylko)
-///////////////////////////////////////////////////////////////
-if ($view === 'teams') {
-  require_once __DIR__ . '/../app/db.php';
-  require_once __DIR__ . '/../app/teams.php';         // z paczki teams
-  require_once __DIR__ . '/../app/event_results.php'; // dla er_fetch_max_year()
-
-  $maxYear = er_fetch_max_year();
-  if ($maxYear < $MIN_YEAR) $maxYear = $MIN_YEAR;
-
-  $year = isset($_GET['year']) ? (int)$_GET['year'] : $maxYear;
-  if ($year < $MIN_YEAR) $year = $MIN_YEAR;
-  if ($year > $maxYear)   $year = $maxYear;
-
-  $events = t_fetch_me_events_for_year($year);
-  $day = isset($_GET['day']) ? (string)$_GET['day'] : '';
-  if ($day === '') {
-    if (!empty($events)) $day = $events[count($events)-1]['day'];
-    else {
-      for ($y=$year-1; $y >= $MIN_YEAR; $y--) {
-        $evs = t_fetch_me_events_for_year($y);
-        if (!empty($evs)) { $day = $evs[count($evs)-1]['day']; $year = $y; $events = $evs; break; }
-      }
+/**
+ * Renderuje nawigację aplikacji
+ * 
+ * @param string $activeView Aktywny widok
+ * @return void
+ */
+function render_navigation(string $activeView): void {
+    $navItems = [
+        'ranking' => ['label' => 'Ranking', 'icon' => '🏆'],
+        'results' => ['label' => 'Wyniki', 'icon' => '📊'],
+        'teams' => ['label' => 'Zespoły', 'icon' => '👥'],
+    ];
+    
+    echo '<nav class="d-flex gap-2 mb-3" role="navigation" aria-label="Główna nawigacja">';
+    
+    foreach ($navItems as $viewKey => $item) {
+        $isActive = ($viewKey === $activeView);
+        $btnClass = $isActive ? 'btn-primary' : 'btn-outline-secondary';
+        $ariaCurrent = $isActive ? ' aria-current="page"' : '';
+        
+        echo '<a class="btn ' . $btnClass . '"' . $ariaCurrent . ' href="?view=' . urlencode($viewKey) . '">';
+        echo '<span class="me-1">' . $item['icon'] . '</span>';
+        echo e($item['label']);
+        echo '</a>';
     }
-  }
-
-  $by = ($day!=='') ? t_fetch_teams_by_class($day) : [];
-
-  ?>
-  <!doctype html>
-  <html lang="pl">
-  <head>
-    <meta charset="utf-8">
-    <title>Zespoły – <?php echo e($day); ?></title>
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css">
-    <style>.cell-empty{color:#999}</style>
-  </head>
-  <body class="bg-light">
-  <div class="container py-4">
-    <div class="d-flex justify-content-between align-items-center mb-3 w-100">
-      <h1 class="mb-0">Zespoły – Mistrzostwa Europy</h1>
-      <?php render_nav('teams'); ?>
-    </div>
-
-    <form class="row g-2 align-items-end mb-3" method="get" action="">
-      <input type="hidden" name="view" value="teams">
-      <div class="col-auto">
-        <label for="year" class="form-label">Rok</label>
-        <select id="year" name="year" class="form-select" onchange="this.form.submit()">
-          <?php for ($y=$MIN_YEAR; $y <= $maxYear; $y++): ?>
-            <option value="<?php echo $y; ?>" <?php echo ($y===$year?'selected':''); ?>><?php echo $y; ?></option>
-          <?php endfor; ?>
-        </select>
-      </div>
-      <div class="col-auto">
-        <label for="day" class="form-label">Zawody (ME)</label>
-        <select id="day" name="day" class="form-select">
-          <?php foreach ($events as $ev): ?>
-            <option value="<?php echo e($ev['day']); ?>" <?php echo ($ev['day']===$day?'selected':''); ?>>
-              <?php echo e($ev['day'].' – '.$ev['opis']); ?>
-            </option>
-          <?php endforeach; ?>
-        </select>
-      </div>
-      <div class="col-auto"><button class="btn btn-primary">Pokaż</button></div>
-      <div class="col-auto ms-auto">
-        <?php if ($day !== ''): ?>
-          <a class="btn btn-outline-secondary" href="teams_export.php?day=<?php echo urlencode((string)$day); ?>&fmt=csv">Eksport CSV</a>
-          <a class="btn btn-outline-secondary" href="teams_export.php?day=<?php echo urlencode((string)$day); ?>&fmt=json">Eksport JSON</a>
-        <?php endif; ?>
-      </div>
-    </form>
-
-    <?php if ($day === '' || empty($by)): ?>
-      <div class="alert alert-warning">Brak danych zespołów dla wybranego roku / zawodów ME.</div>
-    <?php else: foreach ($by as $classId => $group): if (empty($group['teams'])) continue; ?>
-      <div class="card mb-4 shadow-sm">
-        <div class="card-header bg-dark text-white">Klasa: <?php echo e(class_map_name($classId)); ?></div>
-    <div class="table-responsive">
-     <table class="table table-striped align-middle mb-0" style="table-layout: fixed; width:100%;">
-        <colgroup>
-               <col style="width: 90px;">
-               <col style="width: 18%;">
-               <col style="width: 18%;">
-               <col style="width: 10%;">
-               <col style="width: 18%;">
-               <col style="width: 10%;">
-               <col style="width: 10%;">
-         </colgroup>
-    <thead>
-      <tr>
-               <th>Miejsce</th>
-               <th>Zespół</th>
-               <th>Zawodnik 1</th>
-               <th>Punkty 1</th>
-               <th>Zawodnik 2</th>
-               <th>Punkty 2</th>
-               <th>Razem</th>
-      </tr>
-    </thead>
-            <tbody>
-              <?php foreach ($group['teams'] as $t): ?>
-              <tr>
-                <td><span class="badge bg-primary fs-6"><?php echo (int)($t['rank'] ?? 0); ?></span></td>
-                <td class="fw-semibold"><?php echo e((string)($t['team_name'] ?? '')); ?></td>
-                <td><?php echo e(trim((string)($t['id1_fname'] ?? '').' '.(string)($t['id1_lname'] ?? ''))); ?></td>
-                <td><?php echo number_format((float)($t['id1_total'] ?? 0), 0, ',', ' '); ?></td>
-                <td><?php echo e(trim((string)($t['id2_fname'] ?? '').' '.(string)($t['id2_lname'] ?? ''))); ?></td>
-                <td><?php echo number_format((float)($t['id2_total'] ?? 0), 0, ',', ' '); ?></td>
-                <td class="fw-bold"><?php echo number_format((float)($t['team_total'] ?? 0), 0, ',', ' '); ?></td>
-              </tr>
-              <?php endforeach; ?>
-            </tbody>
-          </table>
-        </div>
-      </div>
-    <?php endforeach; endif; ?>
-
-    <footer class="text-muted small mt-4">Generowane: <?php echo date('Y-m-d H:i:s'); ?> CET/CEST</footer>
-  </div>
-  </body>
-  </html>
-  <?php
-  exit;
+    
+    echo '</nav>';
 }
 
-///////////////////////////////////////////////////////////////
-// WIDOK RANKING
-///////////////////////////////////////////////////////////////
-if ($view === 'ranking') {
-  require_once __DIR__ . '/../app/query_ranking.php';
-  require_once __DIR__ . '/../app/cache.php';
-
-  $cfg = require __DIR__ . '/../app/config.php';
-
-  $maxYear = fetch_max_year();
-  if ($maxYear < $MIN_YEAR) $maxYear = $MIN_YEAR;
-  $selected = isset($_GET['year']) ? (int)$_GET['year'] : (int)($cfg['app']['year'] ?? date('Y'));
-  if ($selected < $MIN_YEAR) $selected = $MIN_YEAR;
-  if ($selected > $maxYear)   $selected = $maxYear;
-
-  $cacheKey = 'v9_ranking_cols:' . $selected;
-  $cached = cache_get($cacheKey, (int)($cfg['app']['cache_ttl'] ?? 300));
-  if ($cached) {
-    $events = $cached['events'] ?? [];
-    $data   = $cached['data']   ?? [];
-  } else {
-    $res = build_annual_ranking_with_columns($selected);
-    $events = $res['events'] ?? [];
-    $data   = $res['data']   ?? [];
-    $data   = to_utf8($data);
-    cache_set($cacheKey, ['events'=>$events, 'data'=>$data]);
-  }
-  $filtered = [];
-  foreach ($data as $classKey => $rows) if (!empty($rows)) $filtered[$classKey] = $rows;
-  ?>
-  <!doctype html>
-  <html lang="pl">
-  <head>
-    <meta charset="utf-8">
-    <title>Ranking – <?php echo e($selected); ?></title>
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css">
-    <link rel="stylesheet" href="assets/style.css">
-    <style>.cell-selected{font-weight:700}.cell-empty{color:#999}</style>
-  </head>
-  <body class="bg-light">
-  <div class="container py-4">
-    <div class="d-flex justify-content-between align-items-center mb-3 w-100">
-      <h1 class="mb-0">Roczny ranking – <?php echo e($selected); ?></h1>
-      <?php render_nav('ranking'); ?>
-    </div>
-
-    <form class="d-flex align-items-center mb-3" method="get" action="">
-      <input type="hidden" name="view" value="ranking">
-      <label for="year" class="me-2">Rok:</label>
-      <select id="year" name="year" class="form-select me-2" style="max-width:160px">
-        <?php for ($y=$MIN_YEAR;$y<=$maxYear;$y++): ?>
-        <option value="<?php echo $y; ?>" <?php echo ($y===$selected?'selected':''); ?>><?php echo $y; ?></option>
-        <?php endfor; ?>
-      </select>
-      <button class="btn btn-primary">Pokaż</button>
-      <div class="ms-auto d-flex gap-2">
-        <a class="btn btn-outline-secondary" href="export.php?year=<?php echo urlencode((string)$selected); ?>&fmt=csv">Eksport CSV</a>
-        <a class="btn btn-outline-secondary" href="export.php?year=<?php echo urlencode((string)$selected); ?>&fmt=json">Eksport JSON</a>
-      </div>
-    </form>
-
-    <?php if (empty($filtered)): ?>
-      <div class="alert alert-warning">Brak danych do wyświetlenia.</div>
-    <?php else: foreach ($filtered as $classKey => $rows): ?>
-      <div class="card mb-4 shadow-sm">
-        <div class="card-header bg-dark text-white">Klasa: <?php echo e(class_map_name($classKey)); ?></div>
-        <div class="table-responsive">
-          <table class="table table-striped align-middle mb-0">
-            <thead>
-              <tr>
-                <th style="width: 90px;">Miejsce</th>
-                <th>Zawodnik</th>
-                <?php foreach ($events as $d): ?><th><?php echo e($d); ?></th><?php endforeach; ?>
-                <th class="text-end">Wynik roczny</th>
-              </tr>
-            </thead>
-            <tbody>
-              <?php foreach ($rows as $r): ?>
-              <tr>
-                <td><span class="badge bg-primary fs-6"><?php echo (int)($r['rank'] ?? 0); ?></span></td>
-                <td class="fw-semibold"><?php echo e(trim(($r['fname'] ?? '').' '.($r['lname'] ?? ''))); ?></td>
-                <?php foreach ($events as $d):
-                  $cell = $r['cells'][$d] ?? null;
-                  if (!$cell || $cell['score'] === null) {
-                    echo '<td class="cell-empty">–</td>';
-                  } else {
-                    $val = number_format((float)$cell['score'], 2, ',', ' ');
-                    $cls = $cell['selected'] ? 'cell-selected' : '';
-                    echo '<td class="'.$cls.'">'.$val.'</td>';
-                  }
-                endforeach; ?>
-                <td class="fw-bold text-end"><?php echo number_format((float)($r['total'] ?? 0), 2, ',', ' '); ?></td>
-              </tr>
-              <?php endforeach; ?>
-            </tbody>
-          </table>
-        </div>
-      </div>
-    <?php endforeach; endif; ?>
-
-    <footer class="text-muted small mt-4">Generowane: <?php echo date('Y-m-d H:i:s'); ?> CET/CEST</footer>
-  </div>
-  </body>
-  </html>
-  <?php
-  exit;
-}
-
-///////////////////////////////////////////////////////////////
-// WIDOK WYNIKI (domyślny)
-///////////////////////////////////////////////////////////////
-require_once __DIR__ . '/../app/event_results.php';
-
-$maxYear = er_fetch_max_year();
-if ($maxYear < $MIN_YEAR) $maxYear = $MIN_YEAR;
-
-$year = isset($_GET['year']) ? (int)$_GET['year'] : $maxYear;
-if ($year < $MIN_YEAR) $year = $MIN_YEAR;
-if ($year > $maxYear)   $year = $maxYear;
-
-$events = er_fetch_events_for_year($year);
-$day = isset($_GET['day']) ? (string)$_GET['day'] : '';
-if ($day === '') {
-  $picked = '';
-  if (!empty($events)) $picked = $events[count($events)-1]['day'];
-  else {
-    for ($y = $year - 1; $y >= $MIN_YEAR; $y--) {
-      $evs = er_fetch_events_for_year($y);
-      if (!empty($evs)) { $picked = $evs[count($evs)-1]['day']; $year = $y; $events = $evs; break; }
+/**
+ * Renderuje breadcrumb nawigację
+ * 
+ * @param array $breadcrumbs Lista breadcrumbs
+ * @return void
+ */
+function render_breadcrumbs(array $breadcrumbs): void {
+    if (empty($breadcrumbs)) return;
+    
+    echo '<nav aria-label="breadcrumb">';
+    echo '<ol class="breadcrumb">';
+    
+    $lastIndex = count($breadcrumbs) - 1;
+    foreach ($breadcrumbs as $index => $crumb) {
+        $isLast = ($index === $lastIndex);
+        
+        echo '<li class="breadcrumb-item' . ($isLast ? ' active' : '') . '">';
+        
+        if ($isLast) {
+            echo e($crumb['title']);
+        } else {
+            echo '<a href="' . e($crumb['url']) . '">' . e($crumb['title']) . '</a>';
+        }
+        
+        echo '</li>';
     }
-  }
-  $day = $picked;
+    
+    echo '</ol>';
+    echo '</nav>';
 }
 
-$allowedSort = [
-  'total'=>true,'avg_moa'=>true,
-  'res_d1'=>true,'x_d1'=>true,'moa_d1'=>true,
-  'res_d2'=>true,'x_d2'=>true,'moa_d2'=>true,
-  'res_d3'=>true,'x_d3'=>true,'moa_d3'=>true,
-];
-$sort = (isset($_GET['sort']) && isset($allowedSort[$_GET['sort']])) ? $_GET['sort'] : 'total';
-$dir  = (isset($_GET['dir']) && strtolower($_GET['dir']) === 'asc') ? 'asc' : 'desc';
+/**
+ * Waliduje i sanityzuje parametry roku
+ * 
+ * @param mixed $yearParam Parametr roku z GET
+ * @param int $maxYear Maksymalny dozwolony rok
+ * @return int Zwalidowany rok
+ */
+function validate_year_parameter($yearParam, int $maxYear): int {
+    $year = (int)($yearParam ?? $maxYear);
+    $minYear = $GLOBALS['config']['app']['min_year'];
+    
+    if ($year < $minYear) {
+        $year = $minYear;
+    } elseif ($year > $maxYear) {
+        $year = $maxYear;
+    }
+    
+    return $year;
+}
 
-$built = ['meta'=>['day'=>$day,'opis'=>''],'tables'=>[]];
-if ($day !== '') $built = er_build_event_tables($day, $sort, $dir);
-$meta = $built['meta']; $tables = $built['tables'];
+/**
+ * Renderuje sekcję statystyk (dla debug/monitoring)
+ * 
+ * @param array $stats Statystyki do wyświetlenia
+ * @return void
+ */
+function render_debug_stats(array $stats): void {
+    global $config;
+    
+    if (!$config['app']['allow_debug']) {
+        return;
+    }
+    
+    echo '<details class="mt-4">';
+    echo '<summary class="text-muted small">Debug Info</summary>';
+    echo '<pre class="small text-muted mt-2">';
+    echo htmlspecialchars(json_encode($stats, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
+    echo '</pre>';
+    echo '</details>';
+}
 
-function sort_link($label, $key, $currentSort, $currentDir, $year, $day) {
-  $nextDir = ($currentSort === $key && $currentDir === 'desc') ? 'asc' : 'desc';
-  $icon = '';
-  if ($currentSort === $key) $icon = $currentDir === 'desc' ? ' ↓' : ' ↑';
-  $url = 'index.php?view=results&year='.urlencode((string)$year).'&day='.urlencode((string)$day).'&sort='.$key.'&dir='.$nextDir;
-  return '<a href="'.$url.'" class="text-decoration-none">'.$label.$icon.'</a>';
+// === ROUTING LOGIC ===
+
+try {
+    switch ($view) {
+        case 'teams':
+            require_once __DIR__ . '/views/teams_view.php';
+            render_teams_view();
+            break;
+            
+        case 'ranking':
+            require_once __DIR__ . '/views/ranking_view.php';
+            render_ranking_view();
+            break;
+            
+        case 'results':
+        default:
+            require_once __DIR__ . '/views/results_view.php';
+            render_results_view();
+            break;
+    }
+    
+} catch (Exception $e) {
+    // Log błędu
+    error_log("Application error in view '{$view}': " . $e->getMessage());
+    
+    // Pokaż przyjazny błąd użytkownikowi
+    ?>
+    <!doctype html>
+    <html lang="pl">
+    <head>
+        <meta charset="utf-8">
+        <title>Błąd - <?php echo e($config['app']['name']); ?></title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css">
+    </head>
+    <body class="bg-light">
+    <div class="container py-4">
+        <div class="alert alert-danger" role="alert">
+            <h4 class="alert-heading">Wystąpił błąd</h4>
+            <p>Przepraszamy, wystąpił nieoczekiwany błąd. Spróbuj ponownie za chwilę.</p>
+            <hr>
+            <p class="mb-0">
+                <a href="?" class="btn btn-primary">Powrót do strony głównej</a>
+                <?php if ($config['app']['allow_debug']): ?>
+                    <small class="text-muted d-block mt-2">Debug: <?php echo e($e->getMessage()); ?></small>
+                <?php endif; ?>
+            </p>
+        </div>
+    </div>
+    </body>
+    </html>
+    <?php
+    exit;
+}
+
+// === DODATKOWE FUNKCJE POMOCNICZE ===
+
+/**
+ * Generuje link sortowania dla kolumn tabeli
+ * 
+ * @param string $label Etykieta kolumny
+ * @param string $sortKey Klucz sortowania
+ * @param string $currentSort Aktualnie wybrane sortowanie
+ * @param string $currentDir Aktualny kierunek sortowania
+ * @param array $additionalParams Dodatkowe parametry URL
+ * @return string HTML link
+ */
+function generate_sort_link(string $label, string $sortKey, string $currentSort, string $currentDir, array $additionalParams = []): string {
+    // Określ następny kierunek sortowania
+    $nextDirection = ($currentSort === $sortKey && $currentDir === 'desc') ? 'asc' : 'desc';
+    
+    // Ikona kierunku
+    $icon = '';
+    if ($currentSort === $sortKey) {
+        $icon = $currentDir === 'desc' ? ' ↓' : ' ↑';
+    }
+    
+    // Buduj URL
+    $params = array_merge($additionalParams, [
+        'sort' => $sortKey,
+        'dir' => $nextDirection
+    ]);
+    
+    $url = '?' . http_build_query($params);
+    
+    return '<a href="' . e($url) . '" class="text-decoration-none text-reset" title="Sortuj według: ' . e($label) . '">' . 
+           e($label) . '<span class="text-muted">' . $icon . '</span></a>';
+}
+
+/**
+ * Formatuje liczbę dla wyświetlania
+ * 
+ * @param float|int|null $number Liczba do formatowania
+ * @param int $decimals Liczba miejsc po przecinku
+ * @param string $nullDisplay Co wyświetlić dla null
+ * @return string Sformatowana liczba
+ */
+function format_display_number($number, int $decimals = 0, string $nullDisplay = '–'): string {
+    if ($number === null || $number === '') {
+        return $nullDisplay;
+    }
+    
+    return format_number((float)$number, $decimals, true);
+}
+
+/**
+ * Generuje unikalne ID dla elementów HTML
+ * 
+ * @param string $prefix Prefix ID
+ * @return string Unikalne ID
+ */
+function generate_element_id(string $prefix = 'elem'): string {
+    static $counter = 0;
+    return $prefix . '_' . (++$counter) . '_' . substr(md5(uniqid()), 0, 6);
+}
+
+/**
+ * Renderuje paginację (dla przyszłego użytku)
+ * 
+ * @param int $currentPage Aktualna strona
+ * @param int $totalPages Łączna liczba stron
+ * @param string $baseUrl Bazowy URL
+ * @return void
+ */
+function render_pagination(int $currentPage, int $totalPages, string $baseUrl): void {
+    if ($totalPages <= 1) return;
+    
+    echo '<nav aria-label="Paginacja wyników">';
+    echo '<ul class="pagination justify-content-center">';
+    
+    // Poprzednia strona
+    $prevDisabled = ($currentPage <= 1) ? ' disabled' : '';
+    $prevPage = max(1, $currentPage - 1);
+    echo '<li class="page-item' . $prevDisabled . '">';
+    echo '<a class="page-link" href="' . e($baseUrl . '&page=' . $prevPage) . '">Poprzednia</a>';
+    echo '</li>';
+    
+    // Strony
+    $startPage = max(1, $currentPage - 2);
+    $endPage = min($totalPages, $currentPage + 2);
+    
+    for ($page = $startPage; $page <= $endPage; $page++) {
+        $active = ($page === $currentPage) ? ' active' : '';
+        echo '<li class="page-item' . $active . '">';
+        echo '<a class="page-link" href="' . e($baseUrl . '&page=' . $page) . '">' . $page . '</a>';
+        echo '</li>';
+    }
+    
+    // Następna strona
+    $nextDisabled = ($currentPage >= $totalPages) ? ' disabled' : '';
+    $nextPage = min($totalPages, $currentPage + 1);
+    echo '<li class="page-item' . $nextDisabled . '">';
+    echo '<a class="page-link" href="' . e($baseUrl . '&page=' . $nextPage) . '">Następna</a>';
+    echo '</li>';
+    
+    echo '</ul>';
+    echo '</nav>';
+}
+
+/**
+ * Renderuje export buttons
+ * 
+ * @param string $baseExportUrl Bazowy URL eksportu
+ * @param array $params Parametry do przekazania
+ * @return void
+ */
+function render_export_buttons(string $baseExportUrl, array $params = []): void {
+    $csvUrl = $baseExportUrl . '?' . http_build_query(array_merge($params, ['fmt' => 'csv']));
+    $jsonUrl = $baseExportUrl . '?' . http_build_query(array_merge($params, ['fmt' => 'json']));
+    
+    echo '<div class="btn-group" role="group" aria-label="Opcje eksportu">';
+    echo '<a class="btn btn-outline-secondary btn-sm" href="' . e($csvUrl) . '" title="Eksport do pliku CSV">';
+    echo '<i class="bi bi-file-earmark-spreadsheet"></i> CSV';
+    echo '</a>';
+    echo '<a class="btn btn-outline-secondary btn-sm" href="' . e($jsonUrl) . '" title="Eksport do formatu JSON">';
+    echo '<i class="bi bi-file-earmark-code"></i> JSON';
+    echo '</a>';
+    echo '</div>';
+}
+
+/**
+ * Renderuje komunikat o braku danych
+ * 
+ * @param string $message Wiadomość do wyświetlenia
+ * @param string $type Typ alertu Bootstrap
+ * @return void
+ */
+function render_no_data_message(string $message = 'Brak danych do wyświetlenia', string $type = 'info'): void {
+    echo '<div class="alert alert-' . e($type) . ' text-center" role="alert">';
+    echo '<i class="bi bi-info-circle me-2"></i>';
+    echo e($message);
+    echo '</div>';
+}
+
+/**
+ * Renderuje footer aplikacji
+ * 
+ * @param array $additionalInfo Dodatkowe informacje do wyświetlenia
+ * @return void
+ */
+function render_footer(array $additionalInfo = []): void {
+    global $config;
+    
+    echo '<footer class="border-top pt-3 mt-5">';
+    echo '<div class="row">';
+    
+    // Informacje podstawowe
+    echo '<div class="col-md-6">';
+    echo '<p class="text-muted small mb-1">';
+    echo '<strong>' . e($config['app']['name']) . '</strong> v' . e($config['app']['version']);
+    echo '</p>';
+    echo '<p class="text-muted small mb-0">';
+    echo 'Wygenerowano: ' . format_date(time(), 'Y-m-d H:i:s') . ' (' . e($config['app']['timezone']) . ')';
+    echo '</p>';
+    echo '</div>';
+    
+    // Dodatkowe informacje
+    if (!empty($additionalInfo)) {
+        echo '<div class="col-md-6 text-md-end">';
+        foreach ($additionalInfo as $key => $value) {
+            echo '<p class="text-muted small mb-1">';
+            echo '<strong>' . e($key) . ':</strong> ' . e($value);
+            echo '</p>';
+        }
+        echo '</div>';
+    }
+    
+    echo '</div>';
+    
+    // Cache info w trybie debug
+    if ($config['app']['allow_debug']) {
+        $cacheStats = cache_stats();
+        echo '<div class="row mt-2">';
+        echo '<div class="col-12">';
+        echo '<details class="small">';
+        echo '<summary class="text-muted">Cache Stats</summary>';
+        echo '<dl class="row small mt-2">';
+        echo '<dt class="col-sm-3">Status:</dt><dd class="col-sm-9">' . ($cacheStats['enabled'] ? 'Włączony' : 'Wyłączony') . '</dd>';
+        echo '<dt class="col-sm-3">Pliki:</dt><dd class="col-sm-9">' . number_format($cacheStats['files']) . '</dd>';
+        echo '<dt class="col-sm-3">Rozmiar:</dt><dd class="col-sm-9">' . formatBytes($cacheStats['total_size']) . '</dd>';
+        echo '</dl>';
+        echo '</details>';
+        echo '</div>';
+        echo '</div>';
+    }
+    
+    echo '</footer>';
+}
+
+/**
+ * Formatuje rozmiar w bajtach
+ * 
+ * @param int $bytes Rozmiar w bajtach
+ * @param int $precision Precyzja
+ * @return string Sformatowany rozmiar
+ */
+function formatBytes(int $bytes, int $precision = 2): string {
+    $units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    
+    for ($i = 0; $bytes > 1024 && $i < count($units) - 1; $i++) {
+        $bytes /= 1024;
+    }
+    
+    return round($bytes, $precision) . ' ' . $units[$i];
+}
+
+/**
+ * Renderuje loading placeholder
+ * 
+ * @param string $message Wiadomość ładowania
+ * @return void
+ */
+function render_loading_placeholder(string $message = 'Ładowanie...'): void {
+    echo '<div class="d-flex justify-content-center align-items-center py-5">';
+    echo '<div class="spinner-border text-primary me-3" role="status" aria-hidden="true"></div>';
+    echo '<span>' . e($message) . '</span>';
+    echo '</div>';
+}
+
+/**
+ * Sprawdza czy request jest AJAX
+ * 
+ * @return bool True jeśli AJAX
+ */
+function is_ajax_request(): bool {
+    return !empty($_SERVER['HTTP_X_REQUESTED_WITH']) && 
+           strtolower($_SERVER['HTTP_X_REQUESTED_WITH']) === 'xmlhttprequest';
+}
+
+/**
+ * Renderuje JSON response dla AJAX
+ * 
+ * @param mixed $data Dane do zwrócenia
+ * @param int $statusCode Kod statusu HTTP
+ * @return void
+ */
+function render_json_response($data, int $statusCode = 200): void {
+    http_response_code($statusCode);
+    header('Content-Type: application/json; charset=utf-8');
+    
+    $response = [
+        'status' => $statusCode >= 200 && $statusCode < 300 ? 'success' : 'error',
+        'data' => $data,
+        'timestamp' => time(),
+    ];
+    
+    echo json_encode($response, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    exit;
+}
+
+// Sprawdź czy to request AJAX i obsłuż odpowiednio
+if (is_ajax_request()) {
+    // Dla AJAX zwróć tylko dane bez HTML layout
+    try {
+        $data = [];
+        
+        switch ($view) {
+            case 'teams':
+                require_once __DIR__ . '/../app/teams.php';
+                $day = sanitize_input($_GET['day'] ?? '', ['max_length' => 8]);
+                $data = t_fetch_teams_by_class($day);
+                break;
+                
+            case 'ranking':
+                require_once __DIR__ . '/../app/query_ranking.php';
+                $year = validate_year_parameter($_GET['year'], fetch_max_year());
+                $data = build_annual_ranking_with_columns($year);
+                break;
+                
+            case 'results':
+                require_once __DIR__ . '/../app/event_results.php';
+                $day = sanitize_input($_GET['day'] ?? '', ['max_length' => 8]);
+                $sort = sanitize_input($_GET['sort'] ?? 'rank', ['max_length' => 20]);
+                $dir = sanitize_input($_GET['dir'] ?? 'asc', ['max_length' => 4]);
+                $data = er_build_event_tables($day, $sort, $dir);
+                break;
+        }
+        
+        render_json_response($data);
+        
+    } catch (Exception $e) {
+        render_json_response(['error' => $e->getMessage()], 500);
+    }
 }
 ?>
-<!doctype html>
-<html lang="pl">
-<head>
-  <meta charset="utf-8">
-  <title>Wyniki zawodów – <?php echo e($meta['day']); ?></title>
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css">
-  <link rel="stylesheet" href="assets/style.css">
-  <style>
-    .cell-empty{color:#999}.subhdr{font-size:.85rem;color:#666}
-    .sep-left { border-left: 2px solid #dee2e6 !important; }
-  </style>
-</head>
-<body class="bg-light">
-<div class="container py-4">
-  <div class="d-flex justify-content-between align-items-center mb-3 w-100">
-    <h1 class="mb-0">Wyniki zawodów</h1>
-    <?php render_nav('results'); ?>
-  </div>
-
-  <form class="row g-2 align-items-end mb-3" method="get" action="">
-    <input type="hidden" name="view" value="results">
-    <div class="col-auto">
-      <label for="year" class="form-label">Rok</label>
-      <select id="year" name="year" class="form-select" onchange="this.form.submit()">
-        <?php for ($y=$MIN_YEAR; $y <= $maxYear; $y++): ?>
-          <option value="<?php echo $y; ?>" <?php echo ($y===$year?'selected':''); ?>><?php echo $y; ?></option>
-        <?php endfor; ?>
-      </select>
-    </div>
-    <div class="col-auto">
-      <label for="day" class="form-label">Zawody</label>
-      <select id="day" name="day" class="form-select">
-        <?php foreach ($events as $ev): ?>
-          <option value="<?php echo e($ev['day']); ?>" <?php echo ($ev['day']===$day?'selected':''); ?>>
-            <?php echo e($ev['day'].' – '.$ev['opis']); ?>
-          </option>
-        <?php endforeach; ?>
-      </select>
-    </div>
-    <div class="col-auto"><button class="btn btn-primary">Pokaż</button></div>
-    <div class="col-auto ms-auto">
-      <?php if ($day !== ''): ?>
-        <a class="btn btn-outline-secondary" href="results_export.php?day=<?php echo urlencode((string)$day); ?>&fmt=csv">Eksport CSV</a>
-        <a class="btn btn-outline-secondary" href="results_export.php?day=<?php echo urlencode((string)$day); ?>&fmt=json">Eksport JSON</a>
-      <?php endif; ?>
-    </div>
-  </form>
-
-  <div class="mb-3 subhdr">
-    <?php if ($day !== ''): ?>
-      <span><strong>Data:</strong> <?php echo e($meta['day']); ?></span> &nbsp;|&nbsp;
-      <span><strong>Opis:</strong> <?php echo e($meta['opis']); ?></span>
-      &nbsp;|&nbsp; <span><strong>Sort:</strong> <?php echo e($sort); ?> (<?php echo e(strtoupper($dir)); ?>)</span>
-    <?php else: ?>
-      <span>Brak dostępnych zawodów — wybierz inny rok.</span>
-    <?php endif; ?>
-  </div>
-
-  <?php if ($day === ''): ?>
-    <div class="alert alert-info">Brak wybranych zawodów.</div>
-  <?php else: ?>
-    <?php
-      $keys = array_keys($tables);
-      usort($keys, function($a,$b){
-        $ia = (int)$a; $ib = (int)$b;
-        if ((string)$ia === $a && (string)$ib === $b) return $ia <=> $ib;
-        return strcmp($a,$b);
-      });
-      foreach ($keys as $classKey):
-        $rows = $tables[$classKey];
-        if (empty($rows)) continue;
-    ?>
-    <div class="card mb-4 shadow-sm">
-      <div class="card-header bg-dark text-white">Klasa: <?php echo e(class_map_name($classKey)); ?></div>
-      <div class="table-responsive">
-        <table class="table table-striped align-middle mb-0">
-          <thead>
-            <tr>
-              <th style="width: 90px;">Miejsce</th>
-              <th>Zawodnik</th>
-              <th colspan="3" class="text-center sep-left">300 m</th>
-              <th colspan="3" class="text-center sep-left">600 m</th>
-              <th colspan="3" class="text-center sep-left">800 m</th>
-              <th class="text-center sep-left"><?php echo sort_link('Śr. MOA','avg_moa',$sort,$dir,$year,$day); ?></th>
-              <th class="text-end sep-left"><?php echo sort_link('Wynik łączny','total',$sort,$dir,$year,$day); ?></th>
-            </tr>
-            <tr class="text-muted">
-              <th></th><th></th>
-              <th class="sep-left"><?php echo sort_link('Wynik','res_d1',$sort,$dir,$year,$day); ?></th>
-              <th><?php echo sort_link('X','x_d1',$sort,$dir,$year,$day); ?></th>
-              <th><?php echo sort_link('MOA','moa_d1',$sort,$dir,$year,$day); ?></th>
-
-              <th class="sep-left"><?php echo sort_link('Wynik','res_d2',$sort,$dir,$year,$day); ?></th>
-              <th><?php echo sort_link('X','x_d2',$sort,$dir,$year,$day); ?></th>
-              <th><?php echo sort_link('MOA','moa_d2',$sort,$dir,$year,$day); ?></th>
-
-              <th class="sep-left"><?php echo sort_link('Wynik','res_d3',$sort,$dir,$year,$day); ?></th>
-              <th><?php echo sort_link('X','x_d3',$sort,$dir,$year,$day); ?></th>
-              <th><?php echo sort_link('MOA','moa_d3',$sort,$dir,$year,$day); ?></th>
-
-              <th class="sep-left"></th>
-              <th class="sep-left"></th>
-            </tr>
-          </thead>
-          <tbody>
-            <?php foreach ($rows as $r): ?>
-            <tr>
-              <td><span class="badge bg-primary fs-6"><?php echo (int)$r['rank']; ?></span></td>
-              <td class="fw-semibold"><?php echo e(trim(($r['fname'] ?? '').' '.($r['lname'] ?? ''))); ?></td>
-              <?php
-                $cells = [
-                  ['res'=>'res_d1','x'=>'x_d1','moa'=>'moa_d1','cls'=>'sep-left'],
-                  ['res'=>'res_d2','x'=>'x_d2','moa'=>'moa_d2','cls'=>'sep-left'],
-                  ['res'=>'res_d3','x'=>'x_d3','moa'=>'moa_d3','cls'=>'sep-left'],
-                ];
-                foreach ($cells as $c) {
-                  $res = isset($r[$c['res']]) ? (int)$r[$c['res']] : null;
-                  $x   = isset($r[$c['x']]) ? (int)$r[$c['x']] : null;
-                  $moa = isset($r[$c['moa']]) ? $r[$c['moa']] : null;
-                  echo '<td class="'.$c['cls'].'">'.($res===null?'–':number_format($res,0,',',' ')).'</td>';
-                  echo '<td>'.($x===null?'–':number_format($x,0,',',' ')).'</td>';
-                  echo '<td>'.($moa===null?'–':htmlspecialchars((string)$moa, ENT_QUOTES, 'UTF-8')).'</td>';
-                }
-                $avg = isset($r['avg_moa']) ? $r['avg_moa'] : null;
-                echo '<td class="text-center sep-left">'.($avg===null?'':number_format((float)$avg, 3, ',', ' ')).'</td>';
-              ?>
-              <td class="text-end fw-bold sep-left"><?php echo number_format((int)$r['total'], 0, ',', ' '); ?></td>
-            </tr>
-            <?php endforeach; ?>
-          </tbody>
-        </table>
-      </div>
-    </div>
-    <?php endforeach; ?>
-  <?php endif; ?>
-
-  <footer class="text-muted small mt-4">Generowane: <?php echo date('Y-m-d H:i:s'); ?> CET/CEST</footer>
-</div>
-</body>
-</html>
