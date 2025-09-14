@@ -275,9 +275,9 @@ function render_teams_view(): void {
                     <div class="col-lg-3 col-md-6 mb-3">
                         <div class="card stats-card">
                             <div class="card-body text-center">
-                                <i class="bi bi-check-circle-fill fs-1 mb-2"></i>
-                                <h3 class="mb-1"><?php echo $stats['valid_teams']; ?></h3>
-                                <p class="mb-0 small">Zespołów kompletnych</p>
+                                <i class="bi bi-grid-3x3-gap-fill fs-1 mb-2"></i>
+                                <h3 class="mb-1"><?php echo $stats['total_classes']; ?></h3>
+                                <p class="mb-0 small">Klas sprzętowych</p>
                             </div>
                         </div>
                     </div>
@@ -396,18 +396,18 @@ function render_teams_view(): void {
                             <?php if ($classFilter !== ''): ?>
                                 <span class="badge bg-primary me-2">
                                     Klasa: <?php echo e(class_map_name($classFilter)); ?>
-                                    <a href="?view=teams&year=<?php echo $year; ?>&day=<?php echo $day; ?><?php echo $searchTerm ? '&search=' . urlencode($searchTerm) : ''; ?><?php echo $showStats ? '&stats=1' : ''; ?>" 
+                                    <a href="?view=teams&year=<?php echo $year; ?>&day=<?php echo $day; ?><?php echo $searchTerm ? '&search=' . urlencode($searchTerm) : ''; ?><?php echo !$showStats ? '&stats=0' : ''; ?>" 
                                        class="text-white ms-1">×</a>
                                 </span>
                             <?php endif; ?>
                             <?php if ($searchTerm !== ''): ?>
                                 <span class="badge bg-info me-2">
                                     Szukaj: "<?php echo e($searchTerm); ?>"
-                                    <a href="?view=teams&year=<?php echo $year; ?>&day=<?php echo $day; ?><?php echo $classFilter ? '&class=' . $classFilter : ''; ?><?php echo $showStats ? '&stats=1' : ''; ?>" 
+                                    <a href="?view=teams&year=<?php echo $year; ?>&day=<?php echo $day; ?><?php echo $classFilter ? '&class=' . $classFilter : ''; ?><?php echo !$showStats ? '&stats=0' : ''; ?>" 
                                        class="text-white ms-1">×</a>
                                 </span>
                             <?php endif; ?>
-                            <a href="?view=teams&year=<?php echo $year; ?>&day=<?php echo $day; ?><?php echo $showStats ? '&stats=1' : ''; ?>" 
+                            <a href="?view=teams&year=<?php echo $year; ?>&day=<?php echo $day; ?><?php echo !$showStats ? '&stats=0' : ''; ?>" 
                                class="btn btn-outline-secondary btn-sm">Wyczyść filtry</a>
                         </div>
                     <?php endif; ?>
