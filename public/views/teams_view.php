@@ -6,7 +6,7 @@
  * filtrami, statystykami oraz opcjami eksportu.
  * 
  * @author FClass Report Team
- * @version 9.0.2
+ * @version 9.1.0
  * @since 2025
  */
 
@@ -60,14 +60,11 @@ function render_teams_view(): void {
         $day = $events[count($events) - 1]['day']; // Ostatnie ME w wybranym roku
     }
     
-    // Jeśli nadal brak danych w tym roku, NIE szukaj w innych latach
-    // (to powodowało mieszanie dat)
-    
-    // Pobierz dane zespołów
+    // Pobierz dane zespołów z dodatkowymi danymi o centralnych dziesiątkach
     $teamsData = [];
     $eventMeta = null;
     if ($day !== '') {
-        $teamsData = t_fetch_teams_by_class($day);
+        $teamsData = t_fetch_teams_by_class_with_tens($day);
         
         // Znajdź metadane wydarzenia
         foreach ($events as $event) {
@@ -76,6 +73,23 @@ function render_teams_view(): void {
                 break;
             }
         }
+        
+        // FILTRUJ tylko kompletne zespoły (2 zawodników)
+        foreach ($teamsData as $classKey => &$classData) {
+            $classData['teams'] = array_filter($classData['teams'], function($team) {
+                return $team['valid_team'] && 
+                       $team['member1']['valid'] && 
+                       $team['member2']['valid'];
+            });
+            // Re-index array after filtering
+            $classData['teams'] = array_values($classData['teams']);
+        }
+        unset($classData);
+        
+        // Usuń klasy bez zespołów
+        $teamsData = array_filter($teamsData, function($classData) {
+            return !empty($classData['teams']);
+        });
     }
     
     // Filtruj dane po klasie jeśli wybrano
@@ -130,36 +144,53 @@ function render_teams_view(): void {
         <link rel="stylesheet" href="../assets/style.css">
         
         <style>
+            /* Podobny styl jak w results_view.php */
             .teams-table {
                 font-size: 0.9rem;
             }
             .teams-table td, .teams-table th {
-                padding: 0.5rem 0.3rem;
+                padding: 0.5rem 0.25rem;
                 vertical-align: middle;
             }
+            /* Stałe szerokości kolumn */
+            .teams-table th:nth-child(1),
+            .teams-table td:nth-child(1) { width: 80px; }  /* Miejsce */
+            .teams-table th:nth-child(2),
+            .teams-table td:nth-child(2) { width: 200px; } /* Zespół */
+            .teams-table th:nth-child(3),
+            .teams-table td:nth-child(3) { width: 180px; } /* Zawodnik 1 */
+            .teams-table th:nth-child(4),
+            .teams-table td:nth-child(4) { width: 80px; }  /* Punkty 1 */
+            .teams-table th:nth-child(5),
+            .teams-table td:nth-child(5) { width: 60px; }  /* X 1 */
+            .teams-table th:nth-child(6),
+            .teams-table td:nth-child(6) { width: 180px; } /* Zawodnik 2 */
+            .teams-table th:nth-child(7),
+            .teams-table td:nth-child(7) { width: 80px; }  /* Punkty 2 */
+            .teams-table th:nth-child(8),
+            .teams-table td:nth-child(8) { width: 60px; }  /* X 2 */
+            .teams-table th:nth-child(9),
+            .teams-table td:nth-child(9) { width: 100px; } /* Wynik zespołu */
+            .teams-table th:nth-child(10),
+            .teams-table td:nth-child(10) { width: 80px; } /* X zespołu */
+            
+            .separator-column {
+                border-left: 2px solid #dee2e6 !important;
+            }
             .team-row:hover {
-                background-color: rgba(13, 110, 253, 0.05);
-                transform: translateY(-1px);
-                box-shadow: 0 2px 8px rgba(0,0,0,0.1);
-                transition: all 0.2s ease;
+                background-color: rgba(13, 110, 253, 0.1);
             }
             .member-info {
-                font-size: 0.85rem;
+                font-size: 0.9rem;
+                font-weight: 600;
             }
             .team-name {
                 font-weight: 600;
-                color: #0d6efd;
             }
-            .score-highlight {
-                background: linear-gradient(135deg, #28a745, #20c997);
-                color: white;
-                border-radius: 0.375rem;
-                padding: 0.25rem 0.5rem;
-                font-weight: 600;
-            }
-            .invalid-team {
-                opacity: 0.6;
-                background-color: #f8f9fa;
+            .search-highlight {
+                background-color: #fff3cd;
+                padding: 0.1rem 0.2rem;
+                border-radius: 0.2rem;
             }
             .stats-card {
                 background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
@@ -172,17 +203,22 @@ function render_teams_view(): void {
                 transform: translateY(-3px);
                 box-shadow: 0 6px 20px rgba(0,0,0,0.15);
             }
-            .search-highlight {
-                background-color: #fff3cd;
-                padding: 0.1rem 0.2rem;
-                border-radius: 0.2rem;
+            /* Styl dla central dziesiątek */
+            .tens-value {
+                color: #28a745;
+                font-weight: 600;
+            }
+            .team-total {
+                background-color: rgba(13, 110, 253, 0.1);
+                border-radius: 0.25rem;
+                padding: 0.2rem 0.4rem;
             }
             @media (max-width: 768px) {
                 .teams-table {
                     font-size: 0.8rem;
                 }
                 .teams-table td, .teams-table th {
-                    padding: 0.25rem 0.15rem;
+                    padding: 0.25rem 0.1rem;
                 }
             }
         </style>
@@ -399,7 +435,7 @@ function render_teams_view(): void {
                     z tej samej klasy. Wynik zespołu to suma wyników wszystkich członków.
                     <br>
                     <small class="text-muted">
-                        <strong>Ranking:</strong> 1. Wynik łączny, 2. Wynik lepszego zawodnika, 3. Wynik drugiego zawodnika, 4. Nazwa zespołu alfabetycznie
+                        <strong>Ranking:</strong> 1. Wynik łączny, 2. Suma centralnych dziesiątek (X), 3. Wynik lepszego zawodnika, 4. Nazwa zespołu
                     </small>
                 </div>
             </div>
@@ -424,7 +460,6 @@ function render_teams_view(): void {
                     
                     $className = $classData['class_name'];
                     $teamsCount = count($teams);
-                    $validTeamsCount = count(array_filter($teams, fn($t) => $t['valid_team']));
                 ?>
                     <div class="card class-card mb-4 shadow-sm">
                         <div class="card-header bg-dark text-white d-flex justify-content-between align-items-center">
@@ -433,13 +468,10 @@ function render_teams_view(): void {
                                 Klasa: <?php echo e($className); ?>
                             </h5>
                             <div>
-                                <span class="badge bg-success me-1">
-                                    <?php echo $validTeamsCount; ?> kompletnych
+                                <span class="badge bg-light text-dark">
+                                    <?php echo $teamsCount; ?> zespołów
                                 </span>
-                                <span class="badge bg-light text-dark me-2">
-                                    <?php echo $teamsCount; ?> łącznie
-                                </span>
-                                <button class="btn btn-sm btn-outline-light" 
+                                <button class="btn btn-sm btn-outline-light ms-2" 
                                         type="button" 
                                         data-bs-toggle="collapse" 
                                         data-bs-target="#teams-<?php echo e($classKey); ?>" 
@@ -451,23 +483,26 @@ function render_teams_view(): void {
                         
                         <div class="collapse show" id="teams-<?php echo e($classKey); ?>">
                             <div class="table-responsive">
-                                <table class="table teams-table table-hover mb-0">
+                                <table class="table teams-table table-striped table-hover mb-0">
                                     <thead class="table-dark">
                                         <tr>
-                                            <th style="width: 70px;" class="text-center">Miejsce</th>
-                                            <th style="width: 200px;">Zespół</th>
-                                            <th>Zawodnik 1</th>
-                                            <th class="text-center" style="width: 100px;">Punkty 1</th>
-                                            <th>Zawodnik 2</th>
-                                            <th class="text-center" style="width: 100px;">Punkty 2</th>
-                                            <th class="text-center" style="width: 120px;">Wynik zespołu</th>
+                                            <th class="text-center">Miejsce</th>
+                                            <th>Zespół</th>
+                                            <th class="separator-column">Zawodnik 1</th>
+                                            <th class="text-center">Punkty</th>
+                                            <th class="text-center">X</th>
+                                            <th class="separator-column">Zawodnik 2</th>
+                                            <th class="text-center">Punkty</th>
+                                            <th class="text-center">X</th>
+                                            <th class="text-end separator-column">Wynik</th>
+                                            <th class="text-center">ΣX</th>
                                         </tr>
                                     </thead>
                                     <tbody>
                                         <?php foreach ($teams as $team): ?>
-                                            <tr class="team-row <?php echo $team['valid_team'] ? '' : 'invalid-team'; ?>">
+                                            <tr class="team-row">
                                                 <td class="text-center">
-                                                    <span class="badge <?php echo $team['valid_team'] ? 'bg-primary' : 'bg-secondary'; ?> fs-6">
+                                                    <span class="badge bg-primary fs-6">
                                                         <?php echo (int)$team['rank']; ?>
                                                     </span>
                                                 </td>
@@ -475,62 +510,42 @@ function render_teams_view(): void {
                                                     <div class="team-name">
                                                         <?php echo t_highlight_search_term($team['team_name'], $searchTerm); ?>
                                                     </div>
-                                                    <?php if (!$team['valid_team']): ?>
-                                                        <small class="text-danger">
-                                                            <i class="bi bi-exclamation-triangle me-1"></i>Niepełny zespół
-                                                        </small>
-                                                    <?php endif; ?>
                                                 </td>
                                                 
-                                                <!-- Członek 1 -->
-                                                <td>
+                                                <!-- Zawodnik 1 -->
+                                                <td class="separator-column">
                                                     <div class="member-info">
-                                                        <?php if ($team['member1']['valid']): ?>
-                                                            <?php echo t_highlight_search_term($team['member1']['full_name'], $searchTerm); ?>
-                                                            <br>
-                                                            <small class="text-muted">ID: <?php echo e($team['member1']['id']); ?></small>
-                                                        <?php else: ?>
-                                                            <span class="text-muted">– brak danych –</span>
-                                                        <?php endif; ?>
+                                                        <?php echo t_highlight_search_term($team['member1']['full_name'], $searchTerm); ?>
                                                     </div>
                                                 </td>
                                                 <td class="text-center">
-                                                    <?php if ($team['member1']['valid']): ?>
-                                                        <span class="score-highlight">
-                                                            <?php echo format_display_number($team['member1']['total'], 0); ?>
-                                                        </span>
-                                                    <?php else: ?>
-                                                        <span class="text-muted">–</span>
-                                                    <?php endif; ?>
+                                                    <?php echo format_display_number($team['member1']['total'], 0); ?>
+                                                </td>
+                                                <td class="text-center tens-value">
+                                                    <?php echo format_display_number($team['member1']['tens'] ?? 0, 0); ?>
                                                 </td>
                                                 
-                                                <!-- Członek 2 -->
-                                                <td>
+                                                <!-- Zawodnik 2 -->
+                                                <td class="separator-column">
                                                     <div class="member-info">
-                                                        <?php if ($team['member2']['valid']): ?>
-                                                            <?php echo t_highlight_search_term($team['member2']['full_name'], $searchTerm); ?>
-                                                            <br>
-                                                            <small class="text-muted">ID: <?php echo e($team['member2']['id']); ?></small>
-                                                        <?php else: ?>
-                                                            <span class="text-muted">– brak danych –</span>
-                                                        <?php endif; ?>
+                                                        <?php echo t_highlight_search_term($team['member2']['full_name'], $searchTerm); ?>
                                                     </div>
                                                 </td>
                                                 <td class="text-center">
-                                                    <?php if ($team['member2']['valid']): ?>
-                                                        <span class="score-highlight">
-                                                            <?php echo format_display_number($team['member2']['total'], 0); ?>
-                                                        </span>
-                                                    <?php else: ?>
-                                                        <span class="text-muted">–</span>
-                                                    <?php endif; ?>
+                                                    <?php echo format_display_number($team['member2']['total'], 0); ?>
+                                                </td>
+                                                <td class="text-center tens-value">
+                                                    <?php echo format_display_number($team['member2']['tens'] ?? 0, 0); ?>
                                                 </td>
                                                 
                                                 <!-- Wynik zespołu -->
-                                                <td class="text-center">
-                                                    <div class="fw-bold fs-5 text-primary">
+                                                <td class="text-end fw-bold separator-column">
+                                                    <span class="team-total">
                                                         <?php echo format_display_number($team['team_total'], 0); ?>
-                                                    </div>
+                                                    </span>
+                                                </td>
+                                                <td class="text-center fw-bold tens-value">
+                                                    <?php echo format_display_number($team['team_tens'] ?? 0, 0); ?>
                                                 </td>
                                             </tr>
                                         <?php endforeach; ?>
@@ -542,21 +557,8 @@ function render_teams_view(): void {
                 <?php endforeach; ?>
             <?php endif; ?>
             
-            <!-- Footer -->
-            <?php 
-            $footerInfo = [];
-            if ($day !== '') {
-                $footerInfo['Wydarzenie'] = $eventMeta['formatted_date'] ?? $day;
-                $footerInfo['Klasy'] = count($displayData);
-                $footerInfo['Zespoły'] = array_sum(array_map(fn($c) => count($c['teams']), $displayData));
-                
-                if (!empty($stats)) {
-                    $footerInfo['Kompletne zespoły'] = $stats['valid_teams'];
-                }
-            }
-            
-            render_footer($footerInfo);
-            ?>
+            <!-- Footer - uproszczony -->
+            <?php render_footer([]); ?>
             
             <!-- Debug info -->
             <?php 
@@ -651,14 +653,10 @@ function render_teams_view(): void {
             const teamRows = document.querySelectorAll('.team-row');
             teamRows.forEach(row => {
                 row.addEventListener('mouseenter', function() {
-                    if (!this.classList.contains('invalid-team')) {
-                        this.style.transform = 'translateY(-2px)';
-                        this.style.boxShadow = '0 4px 12px rgba(0,0,0,0.15)';
-                    }
+                    this.style.backgroundColor = 'rgba(13, 110, 253, 0.1)';
                 });
                 row.addEventListener('mouseleave', function() {
-                    this.style.transform = '';
-                    this.style.boxShadow = '';
+                    this.style.backgroundColor = '';
                 });
             });
             
@@ -698,26 +696,250 @@ function render_teams_view(): void {
                 document.body.appendChild(expandAllBtn);
             }
             
-            // Team statistics tooltip
-            const scoreElements = document.querySelectorAll('.score-highlight');
-            scoreElements.forEach(element => {
+            // Tooltip dla centralnych dziesiątek
+            const tensElements = document.querySelectorAll('.tens-value');
+            tensElements.forEach(element => {
                 element.style.cursor = 'help';
-                element.title = 'Suma punktów ze wszystkich dystansów';
-            });
-            
-            // Debug: Log current parameters
-            console.log('Current parameters:', {
-                year: <?php echo json_encode($year); ?>,
-                day: <?php echo json_encode($day); ?>,
-                classFilter: <?php echo json_encode($classFilter); ?>,
-                searchTerm: <?php echo json_encode($searchTerm); ?>,
-                showStats: <?php echo json_encode($showStats); ?>
+                element.title = 'Centralne dziesiątki (X-ring hits)';
             });
         });
         </script>
     </body>
     </html>
     <?php
+}
+
+/**
+ * Pobiera zespoły z danymi o centralnych dziesiątkach
+ * 
+ * @param string $day Dzień wydarzenia
+ * @return array Dane zespołów z centralymi dziesiątkami
+ */
+function t_fetch_teams_by_class_with_tens(string $day): array {
+    $normalizedDay = t_normalize_day($day);
+    if ($normalizedDay === null) {
+        return [];
+    }
+    
+    $cacheKey = "teams_by_class_tens_{$normalizedDay}";
+    $cached = cache_get($cacheKey, 600);
+    
+    if ($cached !== null) {
+        return $cached;
+    }
+    
+    try {
+        $rawTeams = t_fetch_raw_teams_data_with_tens($normalizedDay);
+        $processedTeams = t_process_teams_data_with_tens($rawTeams);
+        
+        if (!empty($processedTeams)) {
+            cache_set($cacheKey, $processedTeams);
+        }
+        
+        return $processedTeams;
+        
+    } catch (Exception $e) {
+        error_log("Error fetching teams with tens for day {$day}: " . $e->getMessage());
+        return [];
+    }
+}
+
+/**
+ * Pobiera surowe dane zespołów z centralnymi dziesiątkami
+ * 
+ * @param string $day Znormalizowany dzień wydarzenia
+ * @return array Surowe dane zespołów
+ */
+function t_fetch_raw_teams_data_with_tens(string $day): array {
+    if (!validateTableName($day)) {
+        throw new InvalidArgumentException("Invalid table name: {$day}");
+    }
+    
+    if (!tableExists($day)) {
+        throw new RuntimeException("Event table does not exist: {$day}");
+    }
+    
+    $pdo = db();
+    
+    $sql = "
+        SELECT
+            t.tclass       AS class_id,
+            t.team_name    AS team_name,
+            t.id1          AS member1_id,
+            r1.fname       AS member1_fname,
+            r1.lname       AS member1_lname,
+            (COALESCE(r1.res_d1,0) + COALESCE(r1.res_d2,0) + COALESCE(r1.res_d3,0)) AS member1_total,
+            (COALESCE(r1.x_d1,0) + COALESCE(r1.x_d2,0) + COALESCE(r1.x_d3,0)) AS member1_tens,
+            t.id2          AS member2_id,
+            r2.fname       AS member2_fname,
+            r2.lname       AS member2_lname,
+            (COALESCE(r2.res_d1,0) + COALESCE(r2.res_d2,0) + COALESCE(r2.res_d3,0)) AS member2_total,
+            (COALESCE(r2.x_d1,0) + COALESCE(r2.x_d2,0) + COALESCE(r2.x_d3,0)) AS member2_tens
+        FROM teams t
+        LEFT JOIN `{$day}` r1 ON r1.id = t.id1 AND r1.class = t.tclass
+        LEFT JOIN `{$day}` r2 ON r2.id = t.id2 AND r2.class = t.tclass
+        WHERE t.tdday = :day
+        ORDER BY t.tclass, t.team_name
+    ";
+    
+    $stmt = $pdo->prepare($sql);
+    $stmt->execute([':day' => $day]);
+    $rows = $stmt->fetchAll();
+    
+    return array_map('clean_for_db', $rows);
+}
+
+/**
+ * Przetwarza surowe dane zespołów z centralnymi dziesiątkami
+ * 
+ * @param array $rawTeams Surowe dane zespołów
+ * @return array Przetworzone zespoły z rankingiem
+ */
+function t_process_teams_data_with_tens(array $rawTeams): array {
+    $teamsByClass = [];
+    
+    foreach ($rawTeams as $row) {
+        $classId = (string)($row['class_id'] ?? '');
+        if ($classId === '') continue;
+        
+        if (!isset($teamsByClass[$classId])) {
+            $teamsByClass[$classId] = [
+                'class_name' => class_map_name($classId),
+                'teams' => [],
+            ];
+        }
+        
+        $team = t_build_team_data_with_tens($row);
+        if ($team !== null) {
+            $teamsByClass[$classId]['teams'][] = $team;
+        }
+    }
+    
+    // Sortuj klasy i przypisz rangi
+    $sortedClasses = sort_classes(array_keys($teamsByClass), 'numeric');
+    $result = [];
+    
+    foreach ($sortedClasses as $classId) {
+        $classData = $teamsByClass[$classId];
+        $sortedTeams = t_sort_and_rank_teams_with_tens($classData['teams']);
+        
+        $result[$classId] = [
+            'class_name' => $classData['class_name'],
+            'teams' => $sortedTeams,
+        ];
+    }
+    
+    return $result;
+}
+
+/**
+ * Buduje dane pojedynczego zespołu z centralnymi dziesiątkami
+ * 
+ * @param array $row Wiersz danych z bazy
+ * @return array|null Dane zespołu lub null jeśli niepoprawne
+ */
+function t_build_team_data_with_tens(array $row): ?array {
+    $teamName = trim((string)($row['team_name'] ?? ''));
+    if ($teamName === '') return null;
+    
+    $member1Total = (float)($row['member1_total'] ?? 0);
+    $member1Tens = (int)($row['member1_tens'] ?? 0);
+    $member2Total = (float)($row['member2_total'] ?? 0);
+    $member2Tens = (int)($row['member2_tens'] ?? 0);
+    
+    $teamTotal = $member1Total + $member2Total;
+    $teamTens = $member1Tens + $member2Tens;
+    
+    $member1 = t_validate_team_member([
+        'id' => (string)($row['member1_id'] ?? ''),
+        'fname' => trim((string)($row['member1_fname'] ?? '')),
+        'lname' => trim((string)($row['member1_lname'] ?? '')),
+        'total' => $member1Total,
+        'tens' => $member1Tens,
+    ]);
+    
+    $member2 = t_validate_team_member([
+        'id' => (string)($row['member2_id'] ?? ''),
+        'fname' => trim((string)($row['member2_fname'] ?? '')),
+        'lname' => trim((string)($row['member2_lname'] ?? '')),
+        'total' => $member2Total,
+        'tens' => $member2Tens,
+    ]);
+    
+    return [
+        'team_name' => $teamName,
+        'member1' => $member1,
+        'member2' => $member2,
+        'team_total' => $teamTotal,
+        'team_tens' => $teamTens,
+        'valid_team' => ($member1['valid'] && $member2['valid']),
+    ];
+}
+
+/**
+ * Sortuje zespoły i przypisuje rangi z uwzględnieniem centralnych dziesiątek
+ * 
+ * @param array $teams Lista zespołów
+ * @return array Posortowane zespoły z rangami
+ */
+function t_sort_and_rank_teams_with_tens(array $teams): array {
+    if (empty($teams)) return [];
+    
+    // Sortuj według wyników zespołu z uwzględnieniem centralnych dziesiątek
+    usort($teams, function($a, $b) {
+        // 1. Wynik łączny zespołu (DESC)
+        if ($a['team_total'] !== $b['team_total']) {
+            return $b['team_total'] <=> $a['team_total'];
+        }
+        
+        // 2. Suma centralnych dziesiątek zespołu (DESC)
+        if ($a['team_tens'] !== $b['team_tens']) {
+            return $b['team_tens'] <=> $a['team_tens'];
+        }
+        
+        // 3. Wynik lepszego zawodnika (DESC)
+        $aBest = max($a['member1']['total'], $a['member2']['total']);
+        $bBest = max($b['member1']['total'], $b['member2']['total']);
+        
+        if ($aBest !== $bBest) {
+            return $bBest <=> $aBest;
+        }
+        
+        // 4. Centralne dziesiątki lepszego zawodnika (DESC)
+        $aBestTens = ($a['member1']['total'] > $a['member2']['total']) ? 
+                      $a['member1']['tens'] : $a['member2']['tens'];
+        $bBestTens = ($b['member1']['total'] > $b['member2']['total']) ? 
+                      $b['member1']['tens'] : $b['member2']['tens'];
+        
+        if ($aBestTens !== $bBestTens) {
+            return $bBestTens <=> $aBestTens;
+        }
+        
+        // 5. Alfabetycznie po nazwie zespołu
+        return strcmp($a['team_name'], $b['team_name']);
+    });
+    
+    // Przypisz rangi
+    $rank = 1;
+    $previousSignature = null;
+    
+    foreach ($teams as $index => &$team) {
+        $signature = json_encode([
+            $team['team_total'],
+            $team['team_tens'],
+            max($team['member1']['total'], $team['member2']['total']),
+        ]);
+        
+        if ($previousSignature === null || $signature !== $previousSignature) {
+            $rank = $index + 1;
+        }
+        
+        $team['rank'] = $rank;
+        $previousSignature = $signature;
+    }
+    unset($team);
+    
+    return $teams;
 }
 
 /**
@@ -770,22 +992,18 @@ function t_filter_teams_by_search(array $teamsData, string $searchTerm): array {
  * @return string Tekst z podświetlonymi frazami
  */
 function t_highlight_search_term(string $text, string $searchTerm): string {
-    // Jeśli brak szukanej frazy lub tekstu, zwróć bezpieczny tekst
     if ($searchTerm === '' || $text === '') {
         return e($text);
     }
     
-    // Escape HTML w całym tekście najpierw dla bezpieczeństwa
     $safeText = e($text);
     $safeSearchTerm = e($searchTerm);
     
-    // Użyj preg_replace z limitem dla bezpieczeństwa (max 10 podświetleń)
     $pattern = '/(' . preg_quote($safeSearchTerm, '/') . ')/iu';
     $replacement = '<span class="search-highlight">$1</span>';
     
     $highlighted = @preg_replace($pattern, $replacement, $safeText, 10);
     
-    // Jeśli preg_replace się nie powiodło, zwróć oryginalny bezpieczny tekst
     if ($highlighted === null) {
         return $safeText;
     }
@@ -803,7 +1021,6 @@ function t_highlight_search_term(string $text, string $searchTerm): string {
 function t_calculate_filtered_stats(array $displayData, array $originalStats): array {
     $stats = $originalStats;
     
-    // Przelicz statystyki dla wyświetlanych danych
     $stats['total_classes'] = count($displayData);
     $stats['total_teams'] = 0;
     $stats['valid_teams'] = 0;
@@ -824,7 +1041,6 @@ function t_calculate_filtered_stats(array $displayData, array $originalStats): a
         }
     }
     
-    // Aktualizuj zakresy punktów
     if (!empty($allScores)) {
         $stats['score_ranges'] = [
             'min' => min($allScores),

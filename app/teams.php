@@ -6,7 +6,7 @@
  * walidacją danych oraz eksportem. Zintegrowane z nowym systemem cache i bezpieczeństwa.
  * 
  * @author FClass Report Team
- * @version 9.0
+ * @version 9.1.0
  * @since 2025
  */
 
@@ -157,6 +157,7 @@ function t_format_event_date(string $day): string {
  * Pobiera zespoły pogrupowane po klasach dla danego dnia ME
  * 
  * Główna funkcja pobierająca i przetwarzająca dane zespołów z rankingiem.
+ * UWAGA: Ta funkcja pobiera też dane o centralnych dziesiątkach!
  * 
  * @param string $day Dzień wydarzenia w formacie YYYYMMDD
  * @param bool $useCache Czy używać cache
@@ -199,6 +200,7 @@ function t_fetch_teams_by_class(string $day, bool $useCache = true): array {
 
 /**
  * Pobiera surowe dane zespołów z bazy danych
+ * POPRAWIONE: Dodane pobieranie centralnych dziesiątek (x_d1, x_d2, x_d3)
  * 
  * @param string $day Znormalizowany dzień wydarzenia
  * @return array Surowe dane zespołów
@@ -214,6 +216,7 @@ function t_fetch_raw_teams_data(string $day): array {
     
     $pdo = db();
     
+    // POPRAWIONE ZAPYTANIE - dodane sumy centralnych dziesiątek
     $sql = "
         SELECT
             t.tclass       AS class_id,
@@ -222,10 +225,12 @@ function t_fetch_raw_teams_data(string $day): array {
             r1.fname       AS member1_fname,
             r1.lname       AS member1_lname,
             (COALESCE(r1.res_d1,0) + COALESCE(r1.res_d2,0) + COALESCE(r1.res_d3,0)) AS member1_total,
+            (COALESCE(r1.x_d1,0) + COALESCE(r1.x_d2,0) + COALESCE(r1.x_d3,0)) AS member1_tens,
             t.id2          AS member2_id,
             r2.fname       AS member2_fname,
             r2.lname       AS member2_lname,
-            (COALESCE(r2.res_d1,0) + COALESCE(r2.res_d2,0) + COALESCE(r2.res_d3,0)) AS member2_total
+            (COALESCE(r2.res_d1,0) + COALESCE(r2.res_d2,0) + COALESCE(r2.res_d3,0)) AS member2_total,
+            (COALESCE(r2.x_d1,0) + COALESCE(r2.x_d2,0) + COALESCE(r2.x_d3,0)) AS member2_tens
         FROM teams t
         LEFT JOIN `{$day}` r1 ON r1.id = t.id1 AND r1.class = t.tclass
         LEFT JOIN `{$day}` r2 ON r2.id = t.id2 AND r2.class = t.tclass
@@ -292,6 +297,7 @@ function t_process_teams_data(array $rawTeams): array {
 
 /**
  * Buduje dane pojedynczego zespołu
+ * POPRAWIONE: Dodane obsługa centralnych dziesiątek
  * 
  * @param array $row Wiersz danych z bazy
  * @return array|null Dane zespołu lub null jeśli niepoprawne
@@ -304,7 +310,11 @@ function t_build_team_data(array $row): ?array {
     
     $member1Total = (float)($row['member1_total'] ?? 0);
     $member2Total = (float)($row['member2_total'] ?? 0);
+    $member1Tens = (int)($row['member1_tens'] ?? 0);  // DODANE
+    $member2Tens = (int)($row['member2_tens'] ?? 0);  // DODANE
+    
     $teamTotal = $member1Total + $member2Total;
+    $teamTens = $member1Tens + $member2Tens;  // DODANE - suma X zespołu
     
     // Waliduj członków zespołu
     $member1 = t_validate_team_member([
@@ -312,6 +322,7 @@ function t_build_team_data(array $row): ?array {
         'fname' => trim((string)($row['member1_fname'] ?? '')),
         'lname' => trim((string)($row['member1_lname'] ?? '')),
         'total' => $member1Total,
+        'tens' => $member1Tens,  // DODANE
     ]);
     
     $member2 = t_validate_team_member([
@@ -319,6 +330,7 @@ function t_build_team_data(array $row): ?array {
         'fname' => trim((string)($row['member2_fname'] ?? '')),
         'lname' => trim((string)($row['member2_lname'] ?? '')),
         'total' => $member2Total,
+        'tens' => $member2Tens,  // DODANE
     ]);
     
     return [
@@ -326,12 +338,14 @@ function t_build_team_data(array $row): ?array {
         'member1' => $member1,
         'member2' => $member2,
         'team_total' => $teamTotal,
+        'team_tens' => $teamTens,  // DODANE
         'valid_team' => ($member1['valid'] && $member2['valid']),
     ];
 }
 
 /**
  * Waliduje dane członka zespołu
+ * POPRAWIONE: Dodane pole tens
  * 
  * @param array $memberData Dane członka
  * @return array Zwalidowane dane członka
@@ -355,12 +369,14 @@ function t_validate_team_member(array $memberData): array {
         'lname' => $lname,
         'full_name' => $fullName,
         'total' => (float)($memberData['total'] ?? 0),
+        'tens' => (int)($memberData['tens'] ?? 0),  // DODANE
         'valid' => $validName && ($memberData['total'] ?? 0) >= 0,
     ];
 }
 
 /**
  * Sortuje zespoły i przypisuje rangi
+ * POPRAWIONE: Uwzględnia centralne dziesiątki w sortowaniu
  * 
  * @param array $teams Lista zespołów
  * @return array Posortowane zespoły z rangami
@@ -370,14 +386,19 @@ function t_sort_and_rank_teams(array $teams): array {
         return [];
     }
     
-    // Sortuj według wyników zespołu
+    // Sortuj według wyników zespołu z uwzględnieniem centralnych dziesiątek
     usort($teams, function($a, $b) {
         // 1. Wynik łączny zespołu (DESC)
         if ($a['team_total'] !== $b['team_total']) {
             return $b['team_total'] <=> $a['team_total'];
         }
         
-        // 2. Wynik lepszego zawodnika (DESC)
+        // 2. Suma centralnych dziesiątek zespołu (DESC) - DODANE
+        if (($a['team_tens'] ?? 0) !== ($b['team_tens'] ?? 0)) {
+            return ($b['team_tens'] ?? 0) <=> ($a['team_tens'] ?? 0);
+        }
+        
+        // 3. Wynik lepszego zawodnika (DESC)
         $aBest = max($a['member1']['total'], $a['member2']['total']);
         $bBest = max($b['member1']['total'], $b['member2']['total']);
         
@@ -385,7 +406,17 @@ function t_sort_and_rank_teams(array $teams): array {
             return $bBest <=> $aBest;
         }
         
-        // 3. Wynik drugiego zawodnika (DESC)
+        // 4. Centralne dziesiątki lepszego zawodnika (DESC) - DODANE
+        $aBestTens = ($a['member1']['total'] > $a['member2']['total']) ? 
+                      $a['member1']['tens'] : $a['member2']['tens'];
+        $bBestTens = ($b['member1']['total'] > $b['member2']['total']) ? 
+                      $b['member1']['tens'] : $b['member2']['tens'];
+        
+        if ($aBestTens !== $bBestTens) {
+            return $bBestTens <=> $aBestTens;
+        }
+        
+        // 5. Wynik drugiego zawodnika (DESC)
         $aSecond = min($a['member1']['total'], $a['member2']['total']);
         $bSecond = min($b['member1']['total'], $b['member2']['total']);
         
@@ -393,7 +424,7 @@ function t_sort_and_rank_teams(array $teams): array {
             return $bSecond <=> $aSecond;
         }
         
-        // 4. Alfabetycznie po nazwie zespołu
+        // 6. Alfabetycznie po nazwie zespołu
         return strcmp($a['team_name'], $b['team_name']);
     });
     
@@ -404,6 +435,7 @@ function t_sort_and_rank_teams(array $teams): array {
     foreach ($teams as $index => &$team) {
         $signature = json_encode([
             $team['team_total'],
+            $team['team_tens'] ?? 0,  // DODANE
             max($team['member1']['total'], $team['member2']['total']),
             min($team['member1']['total'], $team['member2']['total']),
         ]);
@@ -439,6 +471,7 @@ function t_fetch_teams_flat(string $day, bool $useCache = true): array {
                 'rank' => $team['rank'] ?? 0,
                 'team_name' => $team['team_name'] ?? '',
                 'team_total' => $team['team_total'] ?? 0,
+                'team_tens' => $team['team_tens'] ?? 0,  // DODANE
                 'valid_team' => $team['valid_team'] ?? false,
                 
                 // Członek 1
@@ -447,6 +480,7 @@ function t_fetch_teams_flat(string $day, bool $useCache = true): array {
                 'member1_lname' => $team['member1']['lname'] ?? '',
                 'member1_full_name' => $team['member1']['full_name'] ?? '',
                 'member1_total' => $team['member1']['total'] ?? 0,
+                'member1_tens' => $team['member1']['tens'] ?? 0,  // DODANE
                 'member1_valid' => $team['member1']['valid'] ?? false,
                 
                 // Członek 2
@@ -455,6 +489,7 @@ function t_fetch_teams_flat(string $day, bool $useCache = true): array {
                 'member2_lname' => $team['member2']['lname'] ?? '',
                 'member2_full_name' => $team['member2']['full_name'] ?? '',
                 'member2_total' => $team['member2']['total'] ?? 0,
+                'member2_tens' => $team['member2']['tens'] ?? 0,  // DODANE
                 'member2_valid' => $team['member2']['valid'] ?? false,
             ];
             
@@ -479,6 +514,7 @@ function t_get_teams_statistics(string $day): array {
         'total_teams' => 0,
         'valid_teams' => 0,
         'total_participants' => 0,
+        'total_tens' => 0,  // DODANE
         'classes_breakdown' => [],
         'score_ranges' => [
             'min' => null,
@@ -488,11 +524,13 @@ function t_get_teams_statistics(string $day): array {
     ];
     
     $allScores = [];
+    $allTens = [];  // DODANE
     
     foreach ($teamsByClass as $classId => $classData) {
         $teamsCount = count($classData['teams']);
         $validTeamsCount = 0;
         $classScores = [];
+        $classTens = [];  // DODANE
         
         foreach ($classData['teams'] as $team) {
             $stats['total_teams']++;
@@ -504,8 +542,14 @@ function t_get_teams_statistics(string $day): array {
             }
             
             $teamScore = $team['team_total'];
+            $teamTens = $team['team_tens'] ?? 0;  // DODANE
+            
             $classScores[] = $teamScore;
             $allScores[] = $teamScore;
+            
+            $classTens[] = $teamTens;  // DODANE
+            $allTens[] = $teamTens;  // DODANE
+            $stats['total_tens'] += $teamTens;  // DODANE
         }
         
         $stats['classes_breakdown'][$classId] = [
@@ -515,6 +559,8 @@ function t_get_teams_statistics(string $day): array {
             'min_score' => !empty($classScores) ? min($classScores) : 0,
             'max_score' => !empty($classScores) ? max($classScores) : 0,
             'avg_score' => !empty($classScores) ? round(array_sum($classScores) / count($classScores), 1) : 0,
+            'total_tens' => array_sum($classTens),  // DODANE
+            'avg_tens' => !empty($classTens) ? round(array_sum($classTens) / count($classTens), 1) : 0,  // DODANE
         ];
     }
     
@@ -581,6 +627,11 @@ function t_search_teams(string $day, array $criteria = []): array {
         
         // Filtr po miejscu
         if (isset($criteria['max_rank']) && $team['rank'] > $criteria['max_rank']) {
+            return false;
+        }
+        
+        // Filtr po minimum centralnych dziesiątek - DODANE
+        if (isset($criteria['min_tens']) && $team['team_tens'] < $criteria['min_tens']) {
             return false;
         }
         
