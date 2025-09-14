@@ -4,9 +4,10 @@
  * 
  * Obsługuje pobieranie, przetwarzanie i prezentację wyników zawodów.
  * Implementuje bezpieczne sortowanie, ranking oraz cache dla wydajności.
+ * Obsługuje również wyniki Long Range (dystans d4).
  * 
  * @author FClass Report Team
- * @version 9.0
+ * @version 10.0
  * @since 2025
  */
 
@@ -94,17 +95,18 @@ function er_fetch_max_year(bool $useCache = true): int {
 }
 
 /**
- * Pobiera listę wydarzeń dla danego roku
+ * Pobiera listę wydarzeń dla danego roku wraz z Long Range
  * 
  * Zwraca wszystkie zawody w roku spełniające kryteria filtrowania.
  * Automatycznie filtruje wykluczone słowa kluczowe.
+ * Dodaje wirtualne wydarzenia Long Range (d4).
  * 
  * @param int $year Rok do wyszukania
  * @param bool $useCache Czy używać cache
  * @return array Lista wydarzeń [['day' => string, 'opis' => string], ...]
  */
 function er_fetch_events_for_year(int $year, bool $useCache = true): array {
-    $cacheKey = "events_year_{$year}";
+    $cacheKey = "events_year_{$year}_with_lr";
     
     if ($useCache) {
         $cached = cache_get($cacheKey, 1800); // 30 minut cache
@@ -116,6 +118,7 @@ function er_fetch_events_for_year(int $year, bool $useCache = true): array {
     try {
         $config = require __DIR__ . '/config.php';
         $excludedKeywords = $config['constants']['excluded_keywords'];
+        $mePhrase = $config['constants']['me_detection_phrase'];
         
         $pdo = db();
         $min = (int)($year . '0000');
@@ -161,9 +164,29 @@ function er_fetch_events_for_year(int $year, bool $useCache = true): array {
                 continue;
             }
             
+            $opis = clean_for_db($row['opis']);
+            
+            // Dodaj standardowe wydarzenie
             $events[] = [
                 'day' => $normalizedDay,
-                'opis' => clean_for_db($row['opis']),
+                'opis' => $opis,
+                'is_long_range' => false,
+                'real_day' => $normalizedDay,
+            ];
+            
+            // Sprawdź czy to ME
+            $isME = (stripos($opis, $mePhrase) !== false);
+            $distanceSuffix = $isME ? '1100m' : '1000y';
+            
+            // Dodaj wirtualne wydarzenie Long Range (data +1 dzień)
+            $virtualDay = date('Ymd', strtotime($normalizedDay . ' +1 day'));
+            $events[] = [
+                'day' => $virtualDay,
+                'real_day' => $normalizedDay,  // Rzeczywista tabela z danymi
+                'opis' => $opis . ' - ' . $distanceSuffix,
+                'is_long_range' => true,
+                'distance_label' => $distanceSuffix,
+                'distance_field' => 'd4'
             ];
         }
         
@@ -178,6 +201,28 @@ function er_fetch_events_for_year(int $year, bool $useCache = true): array {
         error_log("Error fetching events for year {$year}: " . $e->getMessage());
         return [];
     }
+}
+
+/**
+ * Pobiera informacje o konkretnym wydarzeniu
+ * 
+ * @param string $day Dzień wydarzenia
+ * @param array|null $events Lista wydarzeń (opcjonalna)
+ * @return array|null Informacje o wydarzeniu
+ */
+function er_get_event_info(string $day, ?array $events = null): ?array {
+    if ($events === null) {
+        $year = (int)substr($day, 0, 4);
+        $events = er_fetch_events_for_year($year);
+    }
+    
+    foreach ($events as $event) {
+        if ($event['day'] === $day) {
+            return $event;
+        }
+    }
+    
+    return null;
 }
 
 /**
@@ -213,12 +258,15 @@ function er_fetch_results_for_event(string $table): array {
                 COALESCE(res_d1,0) AS res_d1,
                 COALESCE(res_d2,0) AS res_d2,
                 COALESCE(res_d3,0) AS res_d3,
+                COALESCE(res_d4,0) AS res_d4,
                 COALESCE(x_d1,0)   AS x_d1,
                 COALESCE(x_d2,0)   AS x_d2,
                 COALESCE(x_d3,0)   AS x_d3,
+                COALESCE(x_d4,0)   AS x_d4,
                 COALESCE(moa_d1,NULL) AS moa_d1,
                 COALESCE(moa_d2,NULL) AS moa_d2,
-                COALESCE(moa_d3,NULL) AS moa_d3
+                COALESCE(moa_d3,NULL) AS moa_d3,
+                COALESCE(moa_d4,NULL) AS moa_d4
             FROM `{$table}`
             ORDER BY class, lname, fname
         ";
@@ -245,7 +293,7 @@ function er_fetch_results_for_event(string $table): array {
  * Buduje tabele wyników dla wydarzenia z obsługą sortowania
  * 
  * Główna funkcja przetwarzająca wyniki wydarzenia. Obsługuje agregację,
- * ranking, sortowanie oraz walidację danych.
+ * ranking, sortowanie oraz walidację danych. Obsługuje również Long Range.
  * 
  * @param string $day Dzień wydarzenia (YYYYMMDD)
  * @param string|null $sort Kolumna sortowania
@@ -261,17 +309,33 @@ function er_build_event_tables(
 ): array {
     $config = require __DIR__ . '/config.php';
     
+    // Pobierz informacje o wydarzeniu
+    $year = (int)substr($day, 0, 4);
+    $events = er_fetch_events_for_year($year);
+    $eventInfo = er_get_event_info($day, $events);
+    
+    // Jeśli nie znaleziono wydarzenia, zwróć puste dane
+    if ($eventInfo === null) {
+        return ['meta' => ['day' => $day, 'opis' => ''], 'tables' => []];
+    }
+    
+    // Sprawdź czy to Long Range
+    $isLongRange = $eventInfo['is_long_range'] ?? false;
+    $realDay = $eventInfo['real_day'] ?? $day;
+    $distanceLabel = $eventInfo['distance_label'] ?? null;
+    
     // Normalizuj parametry
-    $normalizedDay = er_normalize_day_table($day);
+    $normalizedDay = er_normalize_day_table($realDay);
     if ($normalizedDay === null) {
         return ['meta' => ['day' => $day, 'opis' => ''], 'tables' => []];
     }
     
-    $sort = er_validate_sort_column($sort);
+    $sort = er_validate_sort_column($sort, $isLongRange);
     $direction = er_validate_sort_direction($direction);
     
     // Cache key
-    $cacheKey = "event_tables_{$normalizedDay}_{$sort}_{$direction}";
+    $cacheType = $isLongRange ? 'lr' : 'std';
+    $cacheKey = "event_tables_{$day}_{$cacheType}_{$sort}_{$direction}";
     
     if ($useCache) {
         $cached = cache_get($cacheKey, 900); // 15 minut cache
@@ -281,39 +345,57 @@ function er_build_event_tables(
     }
     
     try {
-        // Pobierz surowe wyniki
+        // Pobierz surowe wyniki z rzeczywistej tabeli
         $rawResults = er_fetch_results_for_event($normalizedDay);
         if (empty($rawResults)) {
-            return ['meta' => ['day' => $day, 'opis' => ''], 'tables' => []];
+            return ['meta' => ['day' => $day, 'opis' => $eventInfo['opis']], 'tables' => []];
         }
         
         // Agreguj wyniki po klasach i zawodnikach
-        $aggregatedClasses = er_aggregate_results_by_class($rawResults);
+        if ($isLongRange) {
+            $aggregatedClasses = er_aggregate_long_range_results_by_class($rawResults);
+        } else {
+            $aggregatedClasses = er_aggregate_results_by_class($rawResults);
+        }
         
         // Przetwórz każdą klasę
         $processedTables = [];
         foreach ($aggregatedClasses as $classKey => $participants) {
-            $processedTables[$classKey] = er_process_class_results(
-                $participants, 
-                $sort, 
-                $direction
-            );
+            if ($isLongRange) {
+                $processedTables[$classKey] = er_process_long_range_class_results(
+                    $participants, 
+                    $sort, 
+                    $direction,
+                    $distanceLabel
+                );
+            } else {
+                $processedTables[$classKey] = er_process_class_results(
+                    $participants, 
+                    $sort, 
+                    $direction
+                );
+            }
         }
         
         // Pobierz metadane wydarzenia
-        $metadata = er_fetch_event_metadata($normalizedDay);
+        $metadata = er_fetch_event_metadata($day, $eventInfo);
         
         $result = [
-            'meta' => $metadata,
+            'meta' => array_merge($metadata, [
+                'is_long_range' => $isLongRange,
+                'distance_label' => $distanceLabel,
+                'real_day' => $realDay
+            ]),
             'tables' => $processedTables,
         ];
         
         // Zapisz w cache
         if ($useCache) {
             cache_set($cacheKey, $result, [
-                'day' => $normalizedDay,
+                'day' => $day,
                 'sort' => $sort,
                 'direction' => $direction,
+                'type' => $cacheType
             ]);
         }
         
@@ -326,7 +408,98 @@ function er_build_event_tables(
 }
 
 /**
- * Agreguje wyniki po klasach i zawodnikach
+ * Agreguje wyniki Long Range po klasach i zawodnikach
+ * 
+ * @param array $rawResults Surowe wyniki z bazy
+ * @return array Zagregowane wyniki
+ */
+function er_aggregate_long_range_results_by_class(array $rawResults): array {
+    $classes = [];
+    
+    foreach ($rawResults as $row) {
+        $class = (string)($row['class'] ?? '');
+        $fname = trim((string)($row['fname'] ?? ''));
+        $lname = trim((string)($row['lname'] ?? ''));
+        
+        // Pomiń rekordy bez nazwiska
+        if ($fname === '' && $lname === '') {
+            continue;
+        }
+        
+        // Utwórz unikalny klucz dla zawodnika
+        $participantKey = er_create_participant_key($fname, $lname);
+        
+        if (!isset($classes[$class])) {
+            $classes[$class] = [];
+        }
+        
+        if (!isset($classes[$class][$participantKey])) {
+            // Używamy tylko d4 dla Long Range
+            $classes[$class][$participantKey] = [
+                'fname' => $fname,
+                'lname' => $lname,
+                'res_d4' => (int)($row['res_d4'] ?? 0),
+                'x_d4' => (int)($row['x_d4'] ?? 0),
+                'moa_d4' => $row['moa_d4'],
+            ];
+        }
+    }
+    
+    return $classes;
+}
+
+/**
+ * Przetwarza wyniki Long Range dla jednej klasy
+ * 
+ * @param array $participants Lista uczestników klasy
+ * @param string $sort Kolumna sortowania
+ * @param string $direction Kierunek sortowania
+ * @param string $distanceLabel Etykieta dystansu
+ * @return array Przetworzone wyniki z rankingiem
+ */
+function er_process_long_range_class_results(
+    array $participants, 
+    string $sort, 
+    string $direction,
+    string $distanceLabel
+): array {
+    if (empty($participants)) {
+        return [];
+    }
+    
+    $results = [];
+    
+    // Oblicz statystyki dla każdego uczestnika
+    foreach ($participants as $participant) {
+        $stats = [
+            'total' => (int)$participant['res_d4'],
+            'sum_x' => (int)$participant['x_d4'],
+            'avg_moa' => $participant['moa_d4'], // Dla jednego dystansu to nie jest średnia
+            'distance_label' => $distanceLabel
+        ];
+        $results[] = array_merge($participant, $stats);
+    }
+    
+    // Filtruj zawodników z wynikiem > 0
+    $results = array_filter($results, function($participant) {
+        return (int)$participant['total'] > 0;
+    });
+    
+    if (empty($results)) {
+        return [];
+    }
+    
+    // Przypisz rangi według standardowych kryteriów
+    $results = er_assign_ranks($results);
+    
+    // Sortuj według wybranego kryterium
+    $results = er_sort_results($results, $sort, $direction);
+    
+    return array_values($results);
+}
+
+/**
+ * Agreguje wyniki po klasach i zawodnikach (standardowe)
  * 
  * Grupuje wyniki po klasie i identyfikuje zawodników po (fname, lname).
  * Obsługuje duplikaty i agregację wyników.
@@ -355,7 +528,7 @@ function er_aggregate_results_by_class(array $rawResults): array {
         }
         
         if (!isset($classes[$class][$participantKey])) {
-            // Nowy zawodnik
+            // Nowy zawodnik - używamy d1, d2, d3 (NIE d4)
             $classes[$class][$participantKey] = [
                 'fname' => $fname,
                 'lname' => $lname,
@@ -411,7 +584,7 @@ function er_create_participant_key(string $fname, string $lname): string {
 }
 
 /**
- * Przetwarza wyniki dla jednej klasy
+ * Przetwarza wyniki dla jednej klasy (standardowe)
  * 
  * Oblicza statystyki, ranking i sortuje według podanych kryteriów.
  * 
@@ -602,18 +775,29 @@ function er_sort_results(array $results, string $sort, string $direction): array
  * Waliduje kolumnę sortowania
  * 
  * @param string|null $sort Kolumna do walidacji
+ * @param bool $isLongRange Czy to Long Range
  * @return string Poprawna kolumna sortowania
  */
-function er_validate_sort_column(?string $sort): string {
+function er_validate_sort_column(?string $sort, bool $isLongRange = false): string {
     $config = require __DIR__ . '/config.php';
     
-    $allowedColumns = [
-        'rank', 'total', 'sum_x', 'avg_moa',
-        'res_d1', 'x_d1', 'moa_d1',
-        'res_d2', 'x_d2', 'moa_d2',
-        'res_d3', 'x_d3', 'moa_d3',
-        'fname', 'lname'
-    ];
+    if ($isLongRange) {
+        // Dla Long Range dozwolone kolumny
+        $allowedColumns = [
+            'rank', 'total', 'sum_x', 'avg_moa',
+            'res_d4', 'x_d4', 'moa_d4',
+            'fname', 'lname'
+        ];
+    } else {
+        // Standardowe kolumny
+        $allowedColumns = [
+            'rank', 'total', 'sum_x', 'avg_moa',
+            'res_d1', 'x_d1', 'moa_d1',
+            'res_d2', 'x_d2', 'moa_d2',
+            'res_d3', 'x_d3', 'moa_d3',
+            'fname', 'lname'
+        ];
+    }
     
     if ($sort !== null && in_array($sort, $allowedColumns, true)) {
         return $sort;
@@ -644,9 +828,18 @@ function er_validate_sort_direction(string $direction): string {
  * Pobiera metadane wydarzenia
  * 
  * @param string $day Dzień wydarzenia
+ * @param array|null $eventInfo Informacje o wydarzeniu
  * @return array Metadane wydarzenia
  */
-function er_fetch_event_metadata(string $day): array {
+function er_fetch_event_metadata(string $day, ?array $eventInfo = null): array {
+    if ($eventInfo !== null) {
+        return [
+            'day' => $day,
+            'opis' => $eventInfo['opis'] ?? '',
+            'generated_at' => date('Y-m-d H:i:s'),
+        ];
+    }
+    
     try {
         $pdo = db();
         $stmt = $pdo->prepare("SELECT opis FROM zawody WHERE data = ? LIMIT 1");
@@ -684,10 +877,11 @@ function er_fetch_event_metadata(string $day): array {
  */
 function er_clear_event_cache(?string $day = null): int {
     if ($day !== null) {
-        // Usuń cache dla konkretnego dnia
+        // Usuń cache dla konkretnego dnia (standard i long range)
         $patterns = [
-            "event_tables_{$day}_*",
-            "events_year_" . substr($day, 0, 4),
+            "event_tables_{$day}_std_*",
+            "event_tables_{$day}_lr_*",
+            "events_year_" . substr($day, 0, 4) . "_with_lr",
         ];
         
         $deleted = 0;
@@ -701,6 +895,9 @@ function er_clear_event_cache(?string $day = null): int {
     } else {
         // Usuń wszystkie wpisy związane z wydarzeniami
         return cache_cleanup();
+    }
+}
+?>      return cache_cleanup();
     }
 }
 ?>
