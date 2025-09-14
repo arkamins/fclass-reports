@@ -6,7 +6,7 @@
  * filtrami, statystykami oraz opcjami eksportu.
  * 
  * @author FClass Report Team
- * @version 9.0
+ * @version 9.0.2
  * @since 2025
  */
 
@@ -20,6 +20,7 @@ function render_teams_view(): void {
     // === INICJALIZACJA I WALIDACJA PARAMETRÓW ===
     require_once __DIR__ . '/../../app/teams.php';
     require_once __DIR__ . '/../../app/cache.php';
+    require_once __DIR__ . '/../../app/classmap.php';
     
     $maxYear = t_fetch_max_year();
     $minYear = $config['app']['min_year'];
@@ -34,23 +35,33 @@ function render_teams_view(): void {
     // === POBIERANIE DANYCH ===
     $events = t_fetch_me_events_for_year($year);
     
-    // Wybierz domyślny dzień jeśli nie podano
-    if ($day === '' && !empty($events)) {
-        $day = $events[count($events) - 1]['day']; // Ostatnie ME
-    }
-    
-    // Jeśli nadal brak danych, spróbuj poprzednie lata
-    if ($day === '' || empty($events)) {
-        for ($searchYear = $year - 1; $searchYear >= $minYear; $searchYear--) {
-            $searchEvents = t_fetch_me_events_for_year($searchYear);
-            if (!empty($searchEvents)) {
-                $year = $searchYear;
-                $events = $searchEvents;
-                $day = $searchEvents[count($searchEvents) - 1]['day'];
-                break;
+    // WAŻNE: Sprawdź czy dzień należy do wybranego roku
+    if ($day !== '') {
+        $dayYear = (int)substr($day, 0, 4);
+        if ($dayYear !== $year) {
+            $day = ''; // Reset dnia jeśli nie pasuje do roku
+        } else {
+            // Sprawdź czy dzień istnieje w wydarzeniach tego roku
+            $dayExists = false;
+            foreach ($events as $event) {
+                if ($event['day'] === $day) {
+                    $dayExists = true;
+                    break;
+                }
+            }
+            if (!$dayExists) {
+                $day = ''; // Reset jeśli dzień nie istnieje w wydarzeniach
             }
         }
     }
+    
+    // Wybierz domyślny dzień jeśli nie podano lub został zresetowany
+    if ($day === '' && !empty($events)) {
+        $day = $events[count($events) - 1]['day']; // Ostatnie ME w wybranym roku
+    }
+    
+    // Jeśli nadal brak danych w tym roku, NIE szukaj w innych latach
+    // (to powodowało mieszanie dat)
     
     // Pobierz dane zespołów
     $teamsData = [];
@@ -195,6 +206,16 @@ function render_teams_view(): void {
                                 | <strong>Klasa:</strong> <?php echo e(class_map_name($classFilter)); ?>
                             <?php endif; ?>
                         </p>
+                    <?php elseif ($day === '' && !empty($events)): ?>
+                        <p class="text-muted mb-0">
+                            <i class="bi bi-info-circle me-1"></i>
+                            Wybierz Mistrzostwa Europy z listy poniżej
+                        </p>
+                    <?php else: ?>
+                        <p class="text-muted mb-0">
+                            <i class="bi bi-exclamation-circle me-1"></i>
+                            Brak Mistrzostw Europy w roku <?php echo $year; ?>
+                        </p>
                     <?php endif; ?>
                 </div>
                 <?php render_navigation('teams'); ?>
@@ -248,17 +269,14 @@ function render_teams_view(): void {
             <!-- Formularz filtrowania -->
             <div class="card mb-4">
                 <div class="card-body">
-                    <form method="get" action="" class="row g-3 align-items-end">
+                    <form method="get" action="" class="row g-3 align-items-end" id="teamsFilterForm">
                         <input type="hidden" name="view" value="teams">
-                        <?php if ($showStats): ?>
-                            <input type="hidden" name="stats" value="1">
-                        <?php endif; ?>
                         
                         <div class="col-md-2">
                             <label for="year" class="form-label">
                                 <i class="bi bi-calendar me-1"></i>Rok
                             </label>
-                            <select id="year" name="year" class="form-select" onchange="this.form.submit()">
+                            <select id="year" name="year" class="form-select">
                                 <?php for ($y = $minYear; $y <= $maxYear; $y++): ?>
                                     <option value="<?php echo $y; ?>" <?php echo ($y === $year) ? 'selected' : ''; ?>>
                                         <?php echo $y; ?>
@@ -273,8 +291,9 @@ function render_teams_view(): void {
                             </label>
                             <select id="day" name="day" class="form-select">
                                 <?php if (empty($events)): ?>
-                                    <option value="">Brak dostępnych ME</option>
+                                    <option value="">Brak dostępnych ME w roku <?php echo $year; ?></option>
                                 <?php else: ?>
+                                    <option value="">-- Wybierz ME --</option>
                                     <?php foreach ($events as $event): ?>
                                         <option value="<?php echo e($event['day']); ?>" 
                                                 <?php echo ($event['day'] === $day) ? 'selected' : ''; ?>>
@@ -292,17 +311,20 @@ function render_teams_view(): void {
                             <select id="class" name="class" class="form-select">
                                 <option value="">Wszystkie</option>
                                 <?php 
-                                $availableClasses = sort_classes(array_keys($teamsData), 'numeric');
-                                foreach ($availableClasses as $classId): 
-                                    if (empty($teamsData[$classId]['teams'])) continue;
-                                    $className = class_map_name($classId);
-                                    $teamsCount = count($teamsData[$classId]['teams']);
+                                if (!empty($teamsData)) {
+                                    $availableClasses = sort_classes(array_keys($teamsData), 'numeric');
+                                    foreach ($availableClasses as $classId): 
+                                        if (empty($teamsData[$classId]['teams'])) continue;
+                                        $className = class_map_name($classId);
+                                        $teamsCount = count($teamsData[$classId]['teams']);
+                                    ?>
+                                        <option value="<?php echo e($classId); ?>" 
+                                                <?php echo ($classId === $classFilter) ? 'selected' : ''; ?>>
+                                            <?php echo e($className . " ({$teamsCount})"); ?>
+                                        </option>
+                                    <?php endforeach;
+                                }
                                 ?>
-                                    <option value="<?php echo e($classId); ?>" 
-                                            <?php echo ($classId === $classFilter) ? 'selected' : ''; ?>>
-                                        <?php echo e($className . " ({$teamsCount})"); ?>
-                                    </option>
-                                <?php endforeach; ?>
                             </select>
                         </div>
                         
@@ -315,15 +337,15 @@ function render_teams_view(): void {
                         </div>
                         
                         <div class="col-md-1">
-                            <button type="submit" class="btn btn-primary w-100">
+                            <button type="submit" class="btn btn-primary w-100" title="Szukaj">
                                 <i class="bi bi-search"></i>
                             </button>
                         </div>
                         
                         <div class="col-md-1">
                             <div class="form-check">
-                                <input class="form-check-input" type="checkbox" name="stats" id="stats" 
-                                       <?php echo $showStats ? 'checked' : ''; ?> onchange="this.form.submit()">
+                                <input class="form-check-input" type="checkbox" name="stats" id="stats" value="1"
+                                       <?php echo $showStats ? 'checked' : ''; ?>>
                                 <label class="form-check-label small" for="stats">
                                     Stats
                                 </label>
@@ -338,18 +360,18 @@ function render_teams_view(): void {
                             <?php if ($classFilter !== ''): ?>
                                 <span class="badge bg-primary me-2">
                                     Klasa: <?php echo e(class_map_name($classFilter)); ?>
-                                    <a href="?view=teams&year=<?php echo $year; ?>&day=<?php echo $day; ?>&search=<?php echo urlencode($searchTerm); ?>" 
+                                    <a href="?view=teams&year=<?php echo $year; ?>&day=<?php echo $day; ?><?php echo $searchTerm ? '&search=' . urlencode($searchTerm) : ''; ?><?php echo $showStats ? '&stats=1' : ''; ?>" 
                                        class="text-white ms-1">×</a>
                                 </span>
                             <?php endif; ?>
                             <?php if ($searchTerm !== ''): ?>
                                 <span class="badge bg-info me-2">
                                     Szukaj: "<?php echo e($searchTerm); ?>"
-                                    <a href="?view=teams&year=<?php echo $year; ?>&day=<?php echo $day; ?>&class=<?php echo $classFilter; ?>" 
+                                    <a href="?view=teams&year=<?php echo $year; ?>&day=<?php echo $day; ?><?php echo $classFilter ? '&class=' . $classFilter : ''; ?><?php echo $showStats ? '&stats=1' : ''; ?>" 
                                        class="text-white ms-1">×</a>
                                 </span>
                             <?php endif; ?>
-                            <a href="?view=teams&year=<?php echo $year; ?>&day=<?php echo $day; ?>" 
+                            <a href="?view=teams&year=<?php echo $year; ?>&day=<?php echo $day; ?><?php echo $showStats ? '&stats=1' : ''; ?>" 
                                class="btn btn-outline-secondary btn-sm">Wyczyść filtry</a>
                         </div>
                     <?php endif; ?>
@@ -360,6 +382,7 @@ function render_teams_view(): void {
                             <?php 
                             $exportParams = ['day' => $day];
                             if ($classFilter) $exportParams['class'] = $classFilter;
+                            if ($searchTerm) $exportParams['search'] = $searchTerm;
                             render_export_buttons('export/teams.php', $exportParams);
                             ?>
                         </div>
@@ -383,7 +406,11 @@ function render_teams_view(): void {
             
             <!-- Zespoły -->
             <?php if ($day === ''): ?>
-                <?php render_no_data_message('Wybierz rok i Mistrzostwa Europy aby wyświetlić zespoły.'); ?>
+                <?php if (empty($events)): ?>
+                    <?php render_no_data_message('Brak Mistrzostw Europy w roku ' . $year . '. Wybierz inny rok.', 'warning'); ?>
+                <?php else: ?>
+                    <?php render_no_data_message('Wybierz Mistrzostwa Europy z listy powyżej aby wyświetlić zespoły.'); ?>
+                <?php endif; ?>
             <?php elseif (empty($displayData)): ?>
                 <?php render_no_data_message('Brak zespołów dla wybranych kryteriów.', 'warning'); ?>
             <?php else: ?>
@@ -556,16 +583,67 @@ function render_teams_view(): void {
         <!-- Custom JS -->
         <script>
         document.addEventListener('DOMContentLoaded', function() {
-            // Auto-submit form on year change
+            // Auto-reload form on year change
             const yearSelect = document.getElementById('year');
             if (yearSelect) {
                 yearSelect.addEventListener('change', function() {
-                    // Reset day and class selection when year changes
-                    const daySelect = document.getElementById('day');
-                    const classSelect = document.getElementById('class');
-                    if (daySelect) daySelect.selectedIndex = 0;
-                    if (classSelect) classSelect.selectedIndex = 0;
-                    this.form.submit();
+                    // Build clean URL with only year and view
+                    const params = new URLSearchParams();
+                    params.append('view', 'teams');
+                    params.append('year', this.value);
+                    
+                    // Preserve stats if checked
+                    const statsCheckbox = document.getElementById('stats');
+                    if (statsCheckbox && statsCheckbox.checked) {
+                        params.append('stats', '1');
+                    }
+                    
+                    // Redirect with clean parameters - no day, class or search
+                    window.location.href = '?' + params.toString();
+                });
+            }
+            
+            // Auto-reload form on day change
+            const daySelect = document.getElementById('day');
+            if (daySelect) {
+                daySelect.addEventListener('change', function() {
+                    if (this.value) {
+                        // Submit form when day is selected
+                        document.getElementById('teamsFilterForm').submit();
+                    }
+                });
+            }
+            
+            // Auto-reload form on stats checkbox change
+            const statsCheckbox = document.getElementById('stats');
+            if (statsCheckbox) {
+                statsCheckbox.addEventListener('change', function() {
+                    document.getElementById('teamsFilterForm').submit();
+                });
+            }
+            
+            // Form submission - clean empty parameters
+            const mainForm = document.getElementById('teamsFilterForm');
+            if (mainForm) {
+                mainForm.addEventListener('submit', function(e) {
+                    e.preventDefault();
+                    
+                    // Collect only non-empty values
+                    const formData = new FormData(this);
+                    const params = new URLSearchParams();
+                    
+                    for (let [key, value] of formData.entries()) {
+                        // Skip empty values except for checkboxes
+                        if (value && value.trim() !== '') {
+                            params.append(key, value.trim());
+                        }
+                    }
+                    
+                    // Always include view
+                    params.set('view', 'teams');
+                    
+                    // Redirect with clean URL
+                    window.location.href = '?' + params.toString();
                 });
             }
             
@@ -573,28 +651,16 @@ function render_teams_view(): void {
             const teamRows = document.querySelectorAll('.team-row');
             teamRows.forEach(row => {
                 row.addEventListener('mouseenter', function() {
-                    this.style.transform = 'translateY(-2px)';
-                    this.style.boxShadow = '0 4px 12px rgba(0,0,0,0.15)';
+                    if (!this.classList.contains('invalid-team')) {
+                        this.style.transform = 'translateY(-2px)';
+                        this.style.boxShadow = '0 4px 12px rgba(0,0,0,0.15)';
+                    }
                 });
                 row.addEventListener('mouseleave', function() {
                     this.style.transform = '';
                     this.style.boxShadow = '';
                 });
             });
-            
-            // Search functionality enhancement
-            const searchInput = document.getElementById('search');
-            if (searchInput) {
-                let searchTimeout;
-                searchInput.addEventListener('input', function() {
-                    clearTimeout(searchTimeout);
-                    searchTimeout = setTimeout(() => {
-                        if (this.value.length >= 2 || this.value.length === 0) {
-                            this.form.submit();
-                        }
-                    }, 500); // Auto-search after 500ms pause
-                });
-            }
             
             // Expand/collapse all functionality
             const expandAllBtn = document.createElement('button');
@@ -638,6 +704,15 @@ function render_teams_view(): void {
                 element.style.cursor = 'help';
                 element.title = 'Suma punktów ze wszystkich dystansów';
             });
+            
+            // Debug: Log current parameters
+            console.log('Current parameters:', {
+                year: <?php echo json_encode($year); ?>,
+                day: <?php echo json_encode($day); ?>,
+                classFilter: <?php echo json_encode($classFilter); ?>,
+                searchTerm: <?php echo json_encode($searchTerm); ?>,
+                showStats: <?php echo json_encode($showStats); ?>
+            });
         });
         </script>
     </body>
@@ -669,8 +744,8 @@ function t_filter_teams_by_search(array $teamsData, string $searchTerm): array {
             }
             
             // Szukaj w nazwiskach członków
-            $member1Name = mb_strtolower($team['member1']['full_name'], 'UTF-8');
-            $member2Name = mb_strtolower($team['member2']['full_name'], 'UTF-8');
+            $member1Name = mb_strtolower($team['member1']['full_name'] ?? '', 'UTF-8');
+            $member2Name = mb_strtolower($team['member2']['full_name'] ?? '', 'UTF-8');
             
             return mb_strpos($member1Name, $searchLower, 0, 'UTF-8') !== false ||
                    mb_strpos($member2Name, $searchLower, 0, 'UTF-8') !== false;
@@ -695,24 +770,27 @@ function t_filter_teams_by_search(array $teamsData, string $searchTerm): array {
  * @return string Tekst z podświetlonymi frazami
  */
 function t_highlight_search_term(string $text, string $searchTerm): string {
+    // Jeśli brak szukanej frazy lub tekstu, zwróć bezpieczny tekst
     if ($searchTerm === '' || $text === '') {
         return e($text);
     }
     
-    $searchLower = mb_strtolower($searchTerm, 'UTF-8');
-    $textLower = mb_strtolower($text, 'UTF-8');
+    // Escape HTML w całym tekście najpierw dla bezpieczeństwa
+    $safeText = e($text);
+    $safeSearchTerm = e($searchTerm);
     
-    $pos = mb_strpos($textLower, $searchLower, 0, 'UTF-8');
-    if ($pos === false) {
-        return e($text);
+    // Użyj preg_replace z limitem dla bezpieczeństwa (max 10 podświetleń)
+    $pattern = '/(' . preg_quote($safeSearchTerm, '/') . ')/iu';
+    $replacement = '<span class="search-highlight">$1</span>';
+    
+    $highlighted = @preg_replace($pattern, $replacement, $safeText, 10);
+    
+    // Jeśli preg_replace się nie powiodło, zwróć oryginalny bezpieczny tekst
+    if ($highlighted === null) {
+        return $safeText;
     }
     
-    $before = mb_substr($text, 0, $pos, 'UTF-8');
-    $match = mb_substr($text, $pos, mb_strlen($searchTerm, 'UTF-8'), 'UTF-8');
-    $after = mb_substr($text, $pos + mb_strlen($searchTerm, 'UTF-8'), null, 'UTF-8');
-    
-    return e($before) . '<span class="search-highlight">' . e($match) . '</span>' . 
-           t_highlight_search_term($after, $searchTerm);
+    return $highlighted;
 }
 
 /**
@@ -753,4 +831,14 @@ function t_calculate_filtered_stats(array $displayData, array $originalStats): a
             'max' => max($allScores),
             'average' => round(array_sum($allScores) / count($allScores), 1),
         ];
+    } else {
+        $stats['score_ranges'] = [
+            'min' => 0,
+            'max' => 0,
+            'average' => 0,
+        ];
     }
+    
+    return $stats;
+}
+?>
